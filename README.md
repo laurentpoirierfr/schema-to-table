@@ -140,25 +140,18 @@ make build|vet|fmt
 
 ```mermaid
 flowchart LR
-    subgraph CLI["CLI (cmd/main.go)"]
-        flags --> plan[Plan du modèle<br/>internal/service]
-        plan --> sql[SQL affiché / exécuté]
+    subgraph Tool["L'outil (cmd/main.go + internal/service)"]
+        schema[JSON Schema 2020-12] --> parse[Parsing + types SQL]
+        data[documents JSON] --> plan[Plan du modèle]
+        parse --> plan
+        headers[headers d'ingestion] --> plan
+        plan --> render[Génération SQL<br/>CREATE / INSERT / UPSERT]
+        render --> out[SQL affiché<br/>ou exécuté]
     end
-    subgraph Bento["Pipeline Bento (pkg/processors)"]
-        batch[batch de messages] --> proc[schema_to_table_insert / _upsert]
-        proc --> lazycreate[création à la volée<br/>tables + vues + registre]
-        lazycreate --> tx[transaction batch<br/>INSERT / UPSERT]
-    end
-    subgraph PG["PostgreSQL"]
-        landing[(landing tables)]
-        views[(vues dénormalisées)]
-        registry[(registre des objets)]
-    end
-    sql --> landing
-    tx --> landing
-    views -.-> landing
-    registry -.-> landing
+    out --> pg[(PostgreSQL)]
 ```
+
+Les processeurs Bento (`pkg/processors`) sont décrits dans **[PROCESSORS.md](PROCESSORS.md)** avec leur propre schéma.
 
 ```
 cmd/main.go      CLI (flags, orchestration create/insert/upsert, exécution PostgreSQL)

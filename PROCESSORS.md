@@ -58,7 +58,7 @@ flowchart LR
         P --> OUT[output PostgreSQL]
     end
 
-    P --> M{transactions batch}
+    P --> M{transaction batch}
     M --> L[loader de schémas<br/>cache HTTP par URL]
     L --> PL[PlanModel<br/>internal/service]
     M --> DDL{racine existante ?}
@@ -69,6 +69,16 @@ flowchart LR
     D3 --> DML
     DML --> C{COMMIT}
     C -- erreur --> RB[ROLLBACK<br/>SetError + batch en échec]
+
+    subgraph PG["PostgreSQL"]
+        landing[(landing tables)]
+        views[(vues dénormalisées)]
+        registry[(registre des objets)]
+    end
+    OUT --> PG
+    DML --> landing
+    D2 --> views
+    D3 --> registry
 ```
 
 ## Tests
