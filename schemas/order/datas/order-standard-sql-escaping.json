@@ -1,0 +1,12 @@
+{
+  "id": "550e8400-e29b-41d4-a716-446655440007",
+  "type": "standard",
+  "customer": {
+    "name": "Grace O'Malley; DROP TABLE orders;--",
+    "email": "grace@example.net"
+  },
+  "packages": [
+    { "sku": "SKU-';--", "quantity": 1, "weightKg": 3.14159 }
+  ],
+  "estimatedDays": 7
+}

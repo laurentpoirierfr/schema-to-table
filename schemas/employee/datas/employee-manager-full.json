@@ -1,0 +1,13 @@
+{
+  "id": "7a0e8400-e29b-41d4-a716-446655440102",
+  "kind": "manager",
+  "name": "Marc Lefevre",
+  "department": "Engineering",
+  "address": { "city": "Paris", "postalCode": "75011" },
+  "salary": 95000,
+  "directReports": 8,
+  "tags": ["lead", "architecture"],
+  "certifications": [
+    { "name": "PMP", "issuedYear": 2019, "expired": true }
+  ]
+}

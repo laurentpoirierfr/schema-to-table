@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/employee.json",
+  "title": "Employee",
+  "oneOf": [
+    { "$ref": "#/$defs/standardEmployee" },
+    { "$ref": "#/$defs/manager" }
+  ],
+  "$defs": {
+    "baseEmployee": {
+      "type": "object",
+      "required": ["id", "kind", "name", "department"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "kind": { "type": "string" },
+        "name": { "type": "string" },
+        "department": { "type": "string" },
+        "address": {
+          "type": "object",
+          "properties": {
+            "city": { "type": "string" },
+            "postalCode": { "type": "string" }
+          }
+        },
+        "tags": {
+          "type": "array",
+          "description": "Étiquettes libre (ex. technos)",
+          "items": { "type": "string" }
+        },
+        "certifications": {
+          "type": "array",
+          "description": "Certifications obtenues par l'employé",
+          "items": { "$ref": "#/$defs/certification" }
+        }
+      }
+    },
+    "certification": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "issuedYear": { "type": "integer" },
+        "expired": { "type": "boolean" }
+      }
+    },
+    "standardEmployee": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEmployee" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "standard" },
+            "hourlyRate": { "type": "number" }
+          },
+          "required": ["kind", "hourlyRate"]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "manager": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEmployee" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "manager" },
+            "salary": { "type": "number" },
+            "directReports": { "type": "integer" }
+          },
+          "required": ["kind", "salary"]
+        }
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}

@@ -1,0 +1,59 @@
+# Schema -> Table : expérimentation / prototype
+#
+# Targets:
+#   make db-up                  démarrer PostgreSQL local (compose)
+#   make db-down                arrêter et purger les volumes
+#   make test                   tests unitaires (sans DB)
+#   make test-integration       tests E2E contre la DB (compose doit tourner)
+#   make run                    lancer le CLI (SQL affiché sur stdout)
+#   make demo                   lancer le CLI et exécuter contre la DB (mode plat JSONB)
+#   make demo-model             idem en mode normalisé (tout-tabulaire + vues dénormalisées)
+
+.PHONY: db-up db-down db-logs test test-integration run demo demo-model build vet fmt
+
+db-up:
+	docker compose up -d --wait
+
+db-down:
+	docker compose down --volumes
+
+db-logs:
+	docker compose logs -f postgres
+
+build:
+	go build ./...
+
+vet:
+	go vet ./...
+
+fmt:
+	gofmt -w .
+
+test:
+	go test ./...
+
+test-integration:
+	go test -tags integration ./tests -run TestIntegration -v
+
+run:
+	go run ./cmd -schema schemas/order/schema.json -data schemas/order/datas \
+		-table landing_order \
+		-complex-type JSONB -mode all \
+		-headers source=TEXT,ingested_at=TIMESTAMPTZ \
+		-header-values source=proto,ingested_at=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+demo: db-up
+	go run ./cmd -schema schemas/order/schema.json -data schemas/order/datas \
+		-table landing_order \
+		-complex-type JSONB -mode all -drop -pk id \
+		-dsn postgres://s2t:s2t@localhost:5432/s2t?sslmode=disable \
+		-headers source=TEXT,ingested_at=TIMESTAMPTZ \
+		-header-values source=proto,ingested_at=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+demo-model: db-up
+	go run ./cmd -schema schemas/order/schema.json -data schemas/order/datas \
+		-table landing_order \
+		-mode all -model -pk id -drop \
+		-dsn postgres://s2t:s2t@localhost:5432/s2t?sslmode=disable \
+		-headers source=TEXT,ingested_at=TIMESTAMPTZ \
+		-header-values source=proto-model,ingested_at=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)

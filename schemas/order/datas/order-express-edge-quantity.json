@@ -1,0 +1,12 @@
+{
+  "id": "550e8400-e29b-41d4-a716-446655440006",
+  "type": "express",
+  "customer": {
+    "name": "Farid \"Le Vite\" Benali",
+    "email": "farid.benali+shop@example.org"
+  },
+  "packages": [
+    { "sku": "SKU-MAX", "quantity": 2147483647, "weightKg": 0.001 }
+  ],
+  "courierPhone": "06 98 76 54 32"
+}

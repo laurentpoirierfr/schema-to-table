@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/order.json",
+  "title": "Order",
+  "oneOf": [
+    { "$ref": "#/$defs/standardOrder" },
+    { "$ref": "#/$defs/expressOrder" }
+  ],
+  "$defs": {
+    "baseOrder": {
+      "type": "object",
+      "required": ["id", "type", "customer", "packages"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "type": { "type": "string" },
+        "customer": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string" },
+            "email": { "type": "string", "format": "email" }
+          }
+        },
+        "packages": {
+          "type": "array",
+          "description": "Colis expédiés dans la commande",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/package" }
+        }
+      }
+    },
+    "package": {
+      "type": "object",
+      "required": ["sku", "quantity"],
+      "properties": {
+        "sku": { "type": "string" },
+        "quantity": { "type": "integer", "minimum": 1 },
+        "weightKg": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "standardOrder": {
+      "allOf": [
+        { "$ref": "#/$defs/baseOrder" },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "standard" },
+            "estimatedDays": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["type"]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "expressOrder": {
+      "allOf": [
+        { "$ref": "#/$defs/baseOrder" },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "express" },
+            "courierPhone": { "type": "string" }
+          },
+          "required": ["type", "courierPhone"]
+        }
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}

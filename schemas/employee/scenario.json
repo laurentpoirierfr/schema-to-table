@@ -1,0 +1,8 @@
+{
+  "table": "landing_employee",
+  "pk": "id",
+  "headers": {
+    "source": "TEXT",
+    "ingested_at": "TIMESTAMPTZ"
+  }
+}

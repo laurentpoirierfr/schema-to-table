@@ -1,0 +1,8 @@
+{
+  "table": "landing_order",
+  "pk": "id",
+  "headers": {
+    "source": "TEXT",
+    "ingested_at": "TIMESTAMPTZ"
+  }
+}

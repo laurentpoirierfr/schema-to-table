@@ -1,0 +1,13 @@
+{
+  "id": "7a0e8400-e29b-41d4-a716-446655440101",
+  "kind": "standard",
+  "name": "Claire Dubois",
+  "department": "Engineering",
+  "address": { "city": "Lyon", "postalCode": "69001" },
+  "hourlyRate": 42.5,
+  "tags": ["backend", "golang"],
+  "certifications": [
+    { "name": "CKA", "issuedYear": 2022, "expired": false },
+    { "name": "AWS-SAA", "issuedYear": 2023, "expired": false }
+  ]
+}

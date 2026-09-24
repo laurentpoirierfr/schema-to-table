@@ -1,0 +1,15 @@
+{
+  "id": "550e8400-e29b-41d4-a716-446655440005",
+  "type": "standard",
+  "customer": {
+    "name": "Élodie O'Connor",
+    "email": "elodie.oconnor@example.com"
+  },
+  "packages": [
+    { "sku": "SKU-A", "quantity": 5, "weightKg": 0.1 },
+    { "sku": "SKU-B", "quantity": 7 },
+    { "sku": "SKU-C", "quantity": 100, "weightKg": 99.99 },
+    { "sku": "SKU-D", "quantity": 1 }
+  ],
+  "estimatedDays": 30
+}

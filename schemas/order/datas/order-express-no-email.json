@@ -1,0 +1,11 @@
+{
+  "id": "550e8400-e29b-41d4-a716-446655440004",
+  "type": "express",
+  "customer": {
+    "name": "Diana Petrova"
+  },
+  "packages": [
+    { "sku": "SKU-300", "quantity": 3, "weightKg": 4.2 }
+  ],
+  "courierPhone": "+49 170 1234567"
+}

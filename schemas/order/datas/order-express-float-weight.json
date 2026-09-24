@@ -1,0 +1,13 @@
+{
+  "id": "550e8400-e29b-41d4-a716-446655440008",
+  "type": "express",
+  "customer": {
+    "name": "Henri Quatre",
+    "email": "henri4@example.fr"
+  },
+  "packages": [
+    { "sku": "SKU-LIGHT", "quantity": 42, "weightKg": 0.0001 },
+    { "sku": "SKU-HEAVY", "quantity": 1, "weightKg": 5000 }
+  ],
+  "courierPhone": "+33 1 42 68 53 00"
+}

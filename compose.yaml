@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: schema-to-table-pg
+    environment:
+      POSTGRES_USER: s2t
+      POSTGRES_PASSWORD: s2t
+      POSTGRES_DB: s2t
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U s2t -d s2t"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:
+    name: schema-to-table_pgdata

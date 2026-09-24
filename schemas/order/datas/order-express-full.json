@@ -1,0 +1,12 @@
+{
+  "id": "550e8400-e29b-41d4-a716-446655440002",
+  "type": "express",
+  "customer": {
+    "name": "Bob Dupont",
+    "email": "bob.dupont@example.com"
+  },
+  "packages": [
+    { "sku": "SKU-100", "quantity": 10, "weightKg": 12.75 }
+  ],
+  "courierPhone": "+33612345678"
+}
