@@ -9,6 +9,8 @@ Deux stratégies de stockage sont supportées, au choix :
 | **Plat (JSONB)** | une table à plat, les objets complexes/tableaux sérialisés dans une colonne `complexType` | `-model` absent |
 | **Normalisé** | une table typée par niveau de tableau + vues dénormalisées `racine × enfant` | `-model` |
 
+Le même moteur est disponible sous forme de **processeurs Bento** (`schema_to_table_insert` / `schema_to_table_upsert`) pour intégrer le stockage dans des pipelines de streaming — voir **[PROCESSORS.md](PROCESSORS.md)**.
+
 ## Fonctionnalités
 
 - **Dérivation de colonnes typées** depuis le schéma : `format: uuid` → `UUID`, `integer` → `BIGINT`, `number` → `NUMERIC`, `boolean` → `BOOLEAN`, chaînes → `TEXT`, `date-time` → `TIMESTAMPTZ`.
@@ -136,6 +138,28 @@ make build|vet|fmt
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    subgraph CLI["CLI (cmd/main.go)"]
+        flags --> plan[Plan du modèle<br/>internal/service]
+        plan --> sql[SQL affiché / exécuté]
+    end
+    subgraph Bento["Pipeline Bento (pkg/processors)"]
+        batch[batch de messages] --> proc[schema_to_table_insert / _upsert]
+        proc --> lazycreate[création à la volée<br/>tables + vues + registre]
+        lazycreate --> tx[transaction batch<br/>INSERT / UPSERT]
+    end
+    subgraph PG["PostgreSQL"]
+        landing[(landing tables)]
+        views[(vues dénormalisées)]
+        registry[(registre des objets)]
+    end
+    sql --> landing
+    tx --> landing
+    views -.-> landing
+    registry -.-> landing
+```
+
 ```
 cmd/main.go      CLI (flags, orchestration create/insert/upsert, exécution PostgreSQL)
 internal/service
@@ -147,6 +171,7 @@ internal/service
 ├── model_ddl.go  DDL tables + vues dénormalisées
 ├── model_dml.go  DML normalisé (+ DELETE deepest-first, navigation JSON)
 └── registry.go   table de registre des objets
+pkg/processors    processeurs Bento (insert/upsert), doc dans PROCESSORS.md
 tests/integration_test.go   tests E2E data-driven
 schemas/                    scénarios (order, employee)
 ```

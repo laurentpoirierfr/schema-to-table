@@ -5,11 +5,14 @@
 #   make db-down                arrêter et purger les volumes
 #   make test                   tests unitaires (sans DB)
 #   make test-integration       tests E2E contre la DB (compose doit tourner)
+#   make test-processors        tests unitaires des processeurs Bento (sans DB)
+#   make test-integration-processors
+#                               test E2E des processeurs Bento contre la DB
 #   make run                    lancer le CLI (SQL affiché sur stdout)
 #   make demo                   lancer le CLI et exécuter contre la DB (mode plat JSONB)
 #   make demo-model             idem en mode normalisé (tout-tabulaire + vues dénormalisées)
 
-.PHONY: db-up db-down db-logs test test-integration run demo demo-model build vet fmt
+.PHONY: db-up db-down db-logs test test-integration test-processors test-integration-processors run demo demo-model build vet fmt
 
 db-up:
 	docker compose up -d --wait
@@ -34,6 +37,12 @@ test:
 
 test-integration:
 	go test -tags integration ./tests -run TestIntegration -v
+
+test-processors:
+	go test ./pkg/processors -v
+
+test-integration-processors:
+	go test -tags integration ./pkg/processors -run TestProcessorsIntegration -count=1 -v
 
 run:
 	go run ./cmd -schema schemas/order/schema.json -data schemas/order/datas \

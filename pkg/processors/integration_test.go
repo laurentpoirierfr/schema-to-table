@@ -28,19 +28,29 @@ func TestProcessorsIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { _ = db.Close() })
 
 	const root = "landing_bento_it"
-	drop := fmt.Sprintf(`
-DROP VIEW IF EXISTS %s;
-DROP TABLE IF EXISTS %s_tags;
-DROP TABLE IF EXISTS %s_registry;
-DROP TABLE IF EXISTS %s CASCADE;`, "v_"+root, root, root, root)
-	if _, err := db.ExecContext(ctx, drop); err != nil {
+	runCleanup := func(ctx context.Context) error {
+		for _, s := range []string{
+			"DROP VIEW IF EXISTS v_" + root + "_tags CASCADE",
+			"DROP TABLE IF EXISTS " + root + "_tags CASCADE",
+			"DROP TABLE IF EXISTS " + root + "_registry CASCADE",
+			"DROP TABLE IF EXISTS " + root + " CASCADE",
+		} {
+			if _, err := db.ExecContext(ctx, s); err != nil {
+				return fmt.Errorf("%s: %w", s, err)
+			}
+		}
+		return nil
+	}
+	if err := runCleanup(ctx); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(), drop)
+		if err := runCleanup(context.Background()); err != nil {
+			t.Errorf("final cleanup: %v", err)
+		}
 	})
 
 	srv, _ := schemaServer(t, testSchema)
