@@ -1,18 +1,20 @@
-package service
+package normalized
 
 import (
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/laurentpoirierfr/schema-to-table/internal/schema"
 )
 
 // ---------------------------------------------------------------------------
 // Normalized (fully-tabular) model.
 //
-// The flat CreateTable/Insert/Upsert API collapses arrays and generic
-// objects into a single complexType (JSONB) column. The model planner
-// instead turns the whole JSON Schema into a set of *typed* tables:
+// The flat landing pipeline (internal/landing) collapses arrays and generic
+// objects into a single complexType column. This planner instead turns the
+// whole JSON Schema into a set of *typed* tables:
 //
 //   - the root table keeps every flattened scalar leaf (one-to-one nested
 //     objects are flattened, so analysts don't need joins for them);
@@ -29,19 +31,19 @@ import (
 
 // TableSpec is one typed relational table planned from the schema.
 type TableSpec struct {
-	Name        string      // SQL table name
-	Columns     []Column    // materialized typed columns, in DDL order
-	PK          string      // root: primary key column name ("" on children)
-	FkCols      []string    // child: FK column names referencing parent key
-	FkColTypes  []string    // child: SQL type of each FkCol
-	RowNoCol    string      // child: row number column name ("row_no")
-	KeyCols     []string    // full key: root [PK]; child FkCols + RowNoCol
-	KeyColTypes []string    // SQL type of each KeyCol
-	Path        []string    // JSON property keys from parent row to this array
-	Schema      *jsonSchema // schema describing one row of this table
-	Parent      *TableSpec  // owning table (nil on root)
-	valueCol    string      // "value" when the child stores an array of scalars
-	Desc        string      // human description of the array property (title/description)
+	Name        string          // SQL table name
+	Columns     []schema.Column // materialized typed columns, in DDL order
+	PK          string          // root: primary key column name ("" on children)
+	FkCols      []string        // child: FK column names referencing parent key
+	FkColTypes  []string        // child: SQL type of each FkCol
+	RowNoCol    string          // child: row number column name ("row_no")
+	KeyCols     []string        // full key: root [PK]; child FkCols + RowNoCol
+	KeyColTypes []string        // SQL type of each KeyCol
+	Path        []string        // JSON property keys from parent row to this array
+	Schema      *schema.Node    // schema describing one row of this table
+	Parent      *TableSpec      // owning table (nil on root)
+	valueCol    string          // "value" when the child stores an array of scalars
+	Desc        string          // human description of the array property (title/description)
 	Arrays      []*TableSpec
 }
 
@@ -51,23 +53,23 @@ type Model struct {
 	Root          *TableSpec
 	Tables        []*TableSpec
 	Discriminator string
-	root          *jsonSchema
+	root          *schema.Node
 	headers       map[string]string
 }
 
-// PlanModel parses the schema document and plans the fully-tabular model.
+// Plan parses the schema document and plans the fully-tabular model.
 // tableName is the root table name, pk the root business key (e.g. "id"),
 // headers map header keys → SQL types (root-only ingestion columns).
-func PlanModel(schemaDoc, tableName, pk string, headers map[string]string) (*Model, error) {
-	root, err := parseSchema(schemaDoc)
+func Plan(schemaDoc, tableName, pk string, headers map[string]string) (*Model, error) {
+	root, err := schema.Parse(schemaDoc)
 	if err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(tableName) == "" {
-		return nil, fmt.Errorf("PlanModel: tableName is required")
+		return nil, fmt.Errorf("Plan: tableName is required")
 	}
 	if strings.TrimSpace(pk) == "" {
-		return nil, fmt.Errorf("PlanModel: pk is required")
+		return nil, fmt.Errorf("Plan: pk is required")
 	}
 
 	m := &Model{root: root, headers: headers}
@@ -75,7 +77,7 @@ func PlanModel(schemaDoc, tableName, pk string, headers map[string]string) (*Mod
 
 	// Phase 1: plan column structure across the whole schema tree
 	// (arrays become child tables; FK/key metadata stays unresolved).
-	if err := planNode(rootSpec, "", root, root, map[*jsonSchema]bool{}); err != nil {
+	if err := planNode(rootSpec, "", root, root, map[*schema.Node]bool{}); err != nil {
 		return nil, err
 	}
 
@@ -91,7 +93,7 @@ func PlanModel(schemaDoc, tableName, pk string, headers map[string]string) (*Mod
 		}
 	}
 	if pkType == "" {
-		return nil, fmt.Errorf("PlanModel: primary key column %q not found among planned columns", pk)
+		return nil, fmt.Errorf("Plan: primary key column %q not found among planned columns", pk)
 	}
 	rootSpec.KeyCols = []string{pk}
 	rootSpec.KeyColTypes = []string{pkType}
@@ -110,7 +112,7 @@ func PlanModel(schemaDoc, tableName, pk string, headers map[string]string) (*Mod
 	}
 
 	if len(root.OneOf)+len(root.AnyOf) > 0 {
-		variants := append(append([]*jsonSchema{}, root.OneOf...), root.AnyOf...)
+		variants := append(append([]*schema.Node{}, root.OneOf...), root.AnyOf...)
 		if d, err := detectDiscriminator(variants, root); err != nil {
 			return nil, err
 		} else if d != "" {
@@ -139,15 +141,15 @@ func tableOrder(root *TableSpec) []*TableSpec {
 // front, so the key is visible at the start of the row. Payload columns
 // that collide by name are dropped.
 func reorderChildColumns(t *TableSpec) {
-	prepend := []Column{}
+	prepend := []schema.Column{}
 	for i, fc := range t.FkCols {
-		prepend = append(prepend, Column{Name: fc, Type: t.FkColTypes[i]})
+		prepend = append(prepend, schema.Column{Name: fc, Type: t.FkColTypes[i]})
 	}
 	if t.RowNoCol != "" {
-		prepend = append(prepend, Column{Name: t.RowNoCol, Type: "INT"})
+		prepend = append(prepend, schema.Column{Name: t.RowNoCol, Type: "INT"})
 	}
 
-	rest := []Column{}
+	rest := []schema.Column{}
 	for _, c := range t.Columns {
 		dup := false
 		for _, p := range prepend {
@@ -165,7 +167,7 @@ func reorderChildColumns(t *TableSpec) {
 
 // detectDiscriminator looks for a single property that every variant
 // declares with a const value — that shared key is the STI type tag.
-func detectDiscriminator(variants []*jsonSchema, root *jsonSchema) (string, error) {
+func detectDiscriminator(variants []*schema.Node, root *schema.Node) (string, error) {
 	variantConsts := make([]map[string]string, 0, len(variants))
 	for _, v := range variants {
 		consts := map[string]string{}
@@ -200,11 +202,11 @@ func detectDiscriminator(variants []*jsonSchema, root *jsonSchema) (string, erro
 
 // collectConsts flattens allOf branches and records the first const value
 // found for each property key.
-func collectConsts(s, root *jsonSchema, out map[string]string) error {
+func collectConsts(s, root *schema.Node, out map[string]string) error {
 	if s == nil {
 		return nil
 	}
-	resolved, err := resolveRef(s, root)
+	resolved, err := schema.Resolve(s, root)
 	if err != nil {
 		return err
 	}
@@ -230,11 +232,11 @@ func collectConsts(s, root *jsonSchema, out map[string]string) error {
 // (flattening one-to-one nested objects) and spawns child tables for
 // arrays. prefix is the underscore-joined flatten path. visited is a
 // per-path cycle guard.
-func planNode(tbl *TableSpec, prefix string, s, root *jsonSchema, visited map[*jsonSchema]bool) error {
+func planNode(tbl *TableSpec, prefix string, s, root *schema.Node, visited map[*schema.Node]bool) error {
 	if s == nil {
 		return nil
 	}
-	resolved, err := resolveRef(s, root)
+	resolved, err := schema.Resolve(s, root)
 	if err != nil {
 		return err
 	}
@@ -249,7 +251,7 @@ func planNode(tbl *TableSpec, prefix string, s, root *jsonSchema, visited map[*j
 			return err
 		}
 	}
-	for _, sub := range append(append([]*jsonSchema{}, resolved.OneOf...), resolved.AnyOf...) {
+	for _, sub := range append(append([]*schema.Node{}, resolved.OneOf...), resolved.AnyOf...) {
 		if err := planNode(tbl, prefix, sub, root, visited); err != nil {
 			return err
 		}
@@ -259,21 +261,21 @@ func planNode(tbl *TableSpec, prefix string, s, root *jsonSchema, visited map[*j
 		return nil
 	}
 
-	for _, key := range sortedKeys(resolved.Properties) {
+	for _, key := range schema.SortedKeys(resolved.Properties) {
 		prop := resolved.Properties[key]
-		segment := toSnake(key)
+		segment := schema.ToSnake(key)
 		childPrefix := segment
 		if prefix != "" {
 			childPrefix = prefix + "_" + segment
 		}
 
-		propResolved, err := resolveRef(prop, root)
+		propResolved, err := schema.Resolve(prop, root)
 		if err != nil {
 			return err
 		}
 
-		isArray := propResolved.Items != nil || primaryType(propResolved) == "array"
-		isObject := primaryType(propResolved) == "object" && propResolved.Items == nil
+		isArray := propResolved.Items != nil || schema.PrimaryType(propResolved) == "array"
+		isObject := schema.PrimaryType(propResolved) == "object" && propResolved.Items == nil
 
 		switch {
 		case isArray:
@@ -289,7 +291,7 @@ func planNode(tbl *TableSpec, prefix string, s, root *jsonSchema, visited map[*j
 				return err
 			}
 		default:
-			addModelColumn(tbl, childPrefix, sqlType(propResolved, "TEXT"))
+			addModelColumn(tbl, childPrefix, schema.SQLType(propResolved, "TEXT"))
 		}
 	}
 	return nil
@@ -298,16 +300,16 @@ func planNode(tbl *TableSpec, prefix string, s, root *jsonSchema, visited map[*j
 // planChildTable builds and registers the child TableSpec for an array
 // property. Arrays of objects → typed columns from items (recursively);
 // arrays of scalars → (fk, row_no, value); anything untyped → hard error.
-func planChildTable(parent *TableSpec, prefix, segment string, prop *jsonSchema, root *jsonSchema) error {
+func planChildTable(parent *TableSpec, prefix, segment string, prop *schema.Node, root *schema.Node) error {
 	if prop.Items == nil {
 		return fmt.Errorf("plan model: untypable array at %q: missing items definition", prefixKey(prefix, segment))
 	}
-	itemResolved, err := resolveRef(prop.Items, root)
+	itemResolved, err := schema.Resolve(prop.Items, root)
 	if err != nil {
 		return err
 	}
 
-	name := parent.Name + "_" + sanitizeIdent(prefix)
+	name := parent.Name + "_" + schema.SanitizeIdent(prefix)
 	// The same array path can be reached through several oneOf variants
 	// (shared base fields) — register the child only once.
 	for _, existing := range parent.Arrays {
@@ -319,22 +321,22 @@ func planChildTable(parent *TableSpec, prefix, segment string, prop *jsonSchema,
 	child := &TableSpec{
 		Name:     name,
 		RowNoCol: "row_no",
-		Path:     append(append([]string{}, parent.Path...), toSnake(segment)),
+		Path:     append(append([]string{}, parent.Path...), schema.ToSnake(segment)),
 		Schema:   itemResolved,
 		Parent:   parent,
 		Desc:     schemaDesc(prop),
 	}
 
-	primary := primaryType(itemResolved)
+	primary := schema.PrimaryType(itemResolved)
 	if primary != "" && primary != "object" && primary != "array" {
 		// Array of scalars → single typed value column.
 		child.valueCol = "value"
-		addModelColumn(child, "value", sqlType(itemResolved, "TEXT"))
+		addModelColumn(child, "value", schema.SQLType(itemResolved, "TEXT"))
 		parent.Arrays = append(parent.Arrays, child)
 		return nil
 	}
 
-	if err := planNode(child, "", itemResolved, root, map[*jsonSchema]bool{}); err != nil {
+	if err := planNode(child, "", itemResolved, root, map[*schema.Node]bool{}); err != nil {
 		return err
 	}
 	parent.Arrays = append(parent.Arrays, child)
@@ -352,13 +354,13 @@ func childFkCols(parent *TableSpec) []string {
 }
 
 func addModelColumn(tbl *TableSpec, name, typ string) {
-	name = sanitizeIdent(name)
+	name = schema.SanitizeIdent(name)
 	for _, c := range tbl.Columns {
 		if c.Name == name {
 			return
 		}
 	}
-	tbl.Columns = append(tbl.Columns, Column{Name: name, Type: typ})
+	tbl.Columns = append(tbl.Columns, schema.Column{Name: name, Type: typ})
 }
 
 func prefixKey(prefix ...string) string {

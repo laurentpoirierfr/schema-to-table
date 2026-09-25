@@ -119,7 +119,7 @@ make test               # tests unitaires (sans base)
 make test-integration   # E2E contre la base (compose doit tourner)
 ```
 
-- Unitaires : `internal/service/*_test.go` (colonnes, valeurs, modèle, vues, registre, troncature des noms).
+- Unitaires : `internal/schema`, `internal/landing` et `internal/normalized` (`*_test.go` : colonnes, valeurs, modèle, vues, registre, troncature des noms).
 - Intégration (`tests/`, build tag `integration`) : data-driven sur `schemas/*/`, invariants génériques (nb de lignes racine = nb de datas, tables enfants = somme des longueurs de tableaux, vues = nb de lignes enfants, registre = tables + vues).
 
 ## Make targets
@@ -140,7 +140,7 @@ make build|vet|fmt
 
 ```mermaid
 flowchart LR
-    subgraph Tool["L'outil (cmd/main.go + internal/service)"]
+    subgraph Tool["L'outil (cmd/main.go + internal/cli, landing, normalized)"]
         schema[JSON Schema 2020-12] --> parse[Parsing + types SQL]
         data[documents JSON] --> plan[Plan du modèle]
         parse --> plan
@@ -154,16 +154,13 @@ flowchart LR
 Les processeurs Bento (`pkg/processors`) sont décrits dans **[PROCESSORS.md](PROCESSORS.md)** avec leur propre schéma.
 
 ```
-cmd/main.go      CLI (flags, orchestration create/insert/upsert, exécution PostgreSQL)
-internal/service
-├── schema.go     parsing JSON Schema, types SQL, sanitisation + limite 63 chars
-├── columns.go    plan de colonnes (mode plat)
-├── values.go     collecte des valeurs payload → littéraux SQL
-├── sql.go        hints CREATE / INSERT / UPSERT (mode plat)
-├── model.go      plan du modèle normalisé (tables, STI, discriminanteur)
-├── model_ddl.go  DDL tables + vues dénormalisées
-├── model_dml.go  DML normalisé (+ DELETE deepest-first, navigation JSON)
-└── registry.go   table de registre des objets
+cmd/main.go      CLI (flags uniquement, délègue tout à internal/cli)
+internal/
+├── schema/      parsing JSON Schema, types SQL, identifiants + limite 63 chars, littéraux SQL
+├── landing/     mode plat : plan de colonnes + CREATE / INSERT / UPSERT (une table + complexType)
+├── normalized/  mode normalisé : plan du modèle (tables, STI, discriminanteur), DDL tables + vues,
+│                DML (+ DELETE deepest-first, navigation JSON), table de registre
+└── cli/         orchestration create/insert/upsert, exécution PostgreSQL, drop
 pkg/processors    processeurs Bento (insert/upsert), doc dans PROCESSORS.md
 tests/integration_test.go   tests E2E data-driven
 schemas/                    scénarios (order, employee)

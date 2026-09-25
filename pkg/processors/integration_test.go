@@ -31,24 +31,11 @@ func TestProcessorsIntegration(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	const root = "landing_bento_it"
-	runCleanup := func(ctx context.Context) error {
-		for _, s := range []string{
-			"DROP VIEW IF EXISTS v_" + root + "_tags CASCADE",
-			"DROP TABLE IF EXISTS " + root + "_tags CASCADE",
-			"DROP TABLE IF EXISTS " + root + "_registry CASCADE",
-			"DROP TABLE IF EXISTS " + root + " CASCADE",
-		} {
-			if _, err := db.ExecContext(ctx, s); err != nil {
-				return fmt.Errorf("%s: %w", s, err)
-			}
-		}
-		return nil
-	}
-	if err := runCleanup(ctx); err != nil {
+	if err := runCleanup(ctx, db, root); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := runCleanup(context.Background()); err != nil {
+		if err := runCleanup(context.Background(), db, root); err != nil {
 			t.Errorf("final cleanup: %v", err)
 		}
 	})
@@ -137,6 +124,69 @@ create_model: true
 	}
 }
 
+// TestProcessorsIntegrationRollback proves the single-transaction guarantee on
+// a real database: a mid-batch failure (duplicate primary key) rolls back the
+// whole transaction — including the model DDL, which must be absent afterwards
+// and the first (valid) message of the batch must not persist.
+func TestProcessorsIntegrationRollback(t *testing.T) {
+	dsn := os.Getenv("S2T_DSN")
+	if dsn == "" {
+		dsn = "postgres://s2t:s2t@localhost:5432/s2t?sslmode=disable"
+	}
+
+	ctx := context.Background()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	const root = "landing_bento_it"
+	if err := runCleanup(ctx, db, root); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runCleanup(context.Background(), db, root); err != nil {
+			t.Errorf("final cleanup: %v", err)
+		}
+	})
+
+	srv, _ := schemaServer(t, testSchema)
+	yaml := fmt.Sprintf(`dsn: %s
+schema_url_header: schema_url
+table_name_header: table_name
+pk: id
+create_model: true
+`, dsn)
+
+	// Two messages sharing the same primary key: the second INSERT violates
+	// the unique constraint, the whole batch must roll back.
+	batch := service.MessageBatch{
+		message(`{"id":1,"name":"alpha","tags":["a","b"]}`, map[string]string{
+			"table_name": root, "schema_url": srv.URL,
+		}),
+		message(`{"id":1,"name":"beta"}`, map[string]string{
+			"table_name": root, "schema_url": srv.URL,
+		}),
+	}
+
+	proc := newTestProcessor(t, false, yaml, newFakeSink())
+	proc.sink = nil // force a real connection
+	proc.opened = false
+	if _, err := proc.ProcessBatch(ctx, batch); err == nil {
+		t.Fatal("expected a duplicate-key error, got nil")
+	}
+
+	// Because the model DDL runs inside the batch transaction, its creation
+	// was rolled back together with the writes.
+	if tableExists(ctx, db, root) {
+		t.Error("root table must not exist after a rolled-back batch")
+	}
+	if tableExists(ctx, db, "v_"+root+"_tags") || tableExists(ctx, db, root+"_registry") {
+		t.Error("view/registry must not exist after a rolled-back batch")
+	}
+}
+
 func rowCounts(ctx context.Context, db *sql.DB, root string) (map[string]int, error) {
 	out := map[string]int{}
 	for _, tbl := range []string{root, root + "_tags"} {
@@ -155,4 +205,21 @@ func tableExists(ctx context.Context, db *sql.DB, name string) bool {
 		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1)`,
 		name).Scan(&ok)
 	return err == nil && ok
+}
+
+// runCleanup drops the objects created by the processors integration tests,
+// one statement at a time (a single multi-statement DROP string fails through
+// pgx when a view still depends on a table).
+func runCleanup(ctx context.Context, db *sql.DB, root string) error {
+	for _, s := range []string{
+		"DROP VIEW IF EXISTS v_" + root + "_tags CASCADE",
+		"DROP TABLE IF EXISTS " + root + "_tags CASCADE",
+		"DROP TABLE IF EXISTS " + root + "_registry CASCADE",
+		"DROP TABLE IF EXISTS " + root + " CASCADE",
+	} {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return fmt.Errorf("%s: %w", s, err)
+		}
+	}
+	return nil
 }

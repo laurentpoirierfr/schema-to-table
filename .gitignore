@@ -1,0 +1,39 @@
+# Local helper/script
+opencode.sh
+
+# Go binaries and build output
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go workspace metadata
+go.work.sum
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs and temp files
+*.log
+*.tmp
+tmp/
+tmp.*
+
+# Local generated artifacts
+/dist/
+/build/

@@ -1,8 +1,10 @@
-package service
+package normalized
 
 import (
 	"fmt"
 	"strings"
+
+	"github.com/laurentpoirierfr/schema-to-table/internal/schema"
 )
 
 // RegistryStatements renders the schema registry: a small table that maps
@@ -17,7 +19,7 @@ import (
 // describe, so the documented names match the DDL exactly.
 func (m *Model) RegistryStatements() ([]string, error) {
 	registry := m.Root.Name + "_registry"
-	cols := []Column{
+	cols := []schema.Column{
 		{Name: "object_type", Type: "TEXT"},
 		{Name: "logical_name", Type: "TEXT"},
 		{Name: "sql_name", Type: "TEXT"},
@@ -58,25 +60,25 @@ func (m *Model) RegistryStatements() ([]string, error) {
 	var lines []string
 	for _, r := range rows {
 		lines = append(lines, fmt.Sprintf("    (%s, %s, %s, %s, %s)",
-			quoteLiteral(r.Type),
-			quoteLiteral(r.Logical),
-			quoteLiteral(identName(r.Logical)),
-			quoteLiteral(r.Path),
-			quoteLiteral(r.Desc)))
+			schema.QuoteLiteral(r.Type),
+			schema.QuoteLiteral(r.Logical),
+			schema.QuoteLiteral(schema.IdentName(r.Logical)),
+			schema.QuoteLiteral(r.Path),
+			schema.QuoteLiteral(r.Desc)))
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "CREATE TABLE %s (\n", quoteIdent(registry))
+	fmt.Fprintf(&b, "CREATE TABLE %s (\n", schema.QuoteIdent(registry))
 	for i, c := range cols {
 		sep := ","
 		if i == len(cols)-1 {
 			sep = ""
 		}
-		fmt.Fprintf(&b, "    %s %s%s\n", quoteIdent(c.Name), c.Type, sep)
+		fmt.Fprintf(&b, "    %s %s%s\n", schema.QuoteIdent(c.Name), c.Type, sep)
 	}
 	b.WriteString(");\n")
 	if len(lines) > 0 {
-		b.WriteString("INSERT INTO " + quoteIdent(registry) + " (object_type, logical_name, sql_name, json_path, description) VALUES\n")
+		b.WriteString("INSERT INTO " + schema.QuoteIdent(registry) + " (object_type, logical_name, sql_name, json_path, description) VALUES\n")
 		b.WriteString(strings.Join(lines, ",\n"))
 		b.WriteString(";\n")
 	}
@@ -98,7 +100,7 @@ func jsonPath(path []string) string {
 
 // schemaDesc extracts the best human description from a schema node:
 // title, then description, then "".
-func schemaDesc(s *jsonSchema) string {
+func schemaDesc(s *schema.Node) string {
 	if s == nil {
 		return ""
 	}

@@ -1,9 +1,11 @@
-package service
+package normalized
 
 import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/laurentpoirierfr/schema-to-table/internal/schema"
 )
 
 // InsertStatements renders the INSERT statements loading one JSON document
@@ -28,7 +30,7 @@ func (m *Model) UpsertStatements(headerValues map[string]string, data string, co
 }
 
 func (m *Model) insert(upsert bool, headerValues map[string]string, data string, conflictColumn string) ([]string, error) {
-	if upsert && sanitizeIdent(conflictColumn) != m.Root.PK {
+	if upsert && schema.SanitizeIdent(conflictColumn) != m.Root.PK {
 		return nil, fmt.Errorf("UpsertStatements: conflict column %q must be the root primary key %q", conflictColumn, m.Root.PK)
 	}
 	var dataNode interface{}
@@ -43,7 +45,7 @@ func (m *Model) insert(upsert bool, headerValues map[string]string, data string,
 	}
 	rootLit := rootVals[m.Root.PK]
 	if rootLit == "" || rootLit == "NULL" {
-		// Absent from the payload, collectValues leaves a NULL literal.
+		// Absent from the payload, CollectValues leaves a NULL literal.
 		return nil, fmt.Errorf("insert/model: root primary key %q not found in payload", m.Root.PK)
 	}
 	rootKey := map[string]string{m.Root.PK: rootLit}
@@ -68,14 +70,14 @@ func (m *Model) insert(upsert bool, headerValues map[string]string, data string,
 			if c.Name == m.Root.PK {
 				continue
 			}
-			updates = append(updates, fmt.Sprintf("    %s = EXCLUDED.%s", quoteIdent(c.Name), quoteIdent(c.Name)))
+			updates = append(updates, fmt.Sprintf("    %s = EXCLUDED.%s", schema.QuoteIdent(c.Name), schema.QuoteIdent(c.Name)))
 		}
 		if len(updates) == 0 {
 			return nil, fmt.Errorf("insert/model: no columns to update besides root key")
 		}
 		stmts = append(stmts, fmt.Sprintf("INSERT INTO %s (%s)\nVALUES (%s)\nON CONFLICT (%s) DO UPDATE SET\n%s;\n",
-			quoteIdent(m.Root.Name), strings.Join(cols, ", "), strings.Join(lits, ", "),
-			quoteIdent(m.Root.PK), strings.Join(updates, ",\n")))
+			schema.QuoteIdent(m.Root.Name), strings.Join(cols, ", "), strings.Join(lits, ", "),
+			schema.QuoteIdent(m.Root.PK), strings.Join(updates, ",\n")))
 	} else {
 		cols, lits, err := m.rowColumnsLits(m.Root, rootVals, nil, 0)
 		if err != nil {
@@ -97,10 +99,10 @@ func (m *Model) gatherRowValues(t *TableSpec, dataNode interface{}, headers map[
 	values := map[string]string{}
 	if t == m.Root {
 		for k, v := range headers {
-			values["header_"+k] = quoteLiteral(v)
+			values["header_"+k] = schema.QuoteLiteral(v)
 		}
 	}
-	if err := collectValues("", t.Schema, m.root, dataNode, "TEXT", values, map[*jsonSchema]bool{}); err != nil {
+	if err := schema.CollectValues("", t.Schema, m.root, dataNode, "TEXT", values, map[*schema.Node]bool{}); err != nil {
 		return nil, fmt.Errorf("gather row %q: %w", t.Name, err)
 	}
 	return values, nil
@@ -113,12 +115,12 @@ func (m *Model) gatherRowValues(t *TableSpec, dataNode interface{}, headers map[
 func (m *Model) rowColumnsLits(t *TableSpec, values map[string]string, parentKeyLits []string, rowNo int) ([]string, []string, error) {
 	var cols, lits []string
 	add := func(name, lit string) {
-		cols = append(cols, quoteIdent(name))
+		cols = append(cols, schema.QuoteIdent(name))
 		lits = append(lits, lit)
 	}
 
 	if t == m.Root {
-		for _, k := range sortedKeys(m.headers) {
+		for _, k := range schema.SortedKeys(m.headers) {
 			name := "header_" + k
 			add(name, values[name])
 		}
@@ -204,9 +206,9 @@ func childDeleteStmt(child *TableSpec, parentKeyLits []string) (string, error) {
 		if i == len(parentKeyLits) {
 			return "", fmt.Errorf("child %q: not enough FK literals", child.Name)
 		}
-		conds = append(conds, fmt.Sprintf("%s = %s", quoteIdent(fc), parentKeyLits[i]))
+		conds = append(conds, fmt.Sprintf("%s = %s", schema.QuoteIdent(fc), parentKeyLits[i]))
 	}
-	return fmt.Sprintf("DELETE FROM %s WHERE %s;\n", quoteIdent(child.Name), strings.Join(conds, " AND ")), nil
+	return fmt.Sprintf("DELETE FROM %s WHERE %s;\n", schema.QuoteIdent(child.Name), strings.Join(conds, " AND ")), nil
 }
 
 // renderChildren walks every array of the row and emits child INSERTs
@@ -236,7 +238,7 @@ func (m *Model) renderChildren(t *TableSpec, subject interface{}, rootKey map[st
 				if child.valueCol != "" {
 					// Array of scalars: one row per scalar in the value column.
 					itemCols, itemLits, err = m.rowColumnsLits(child, map[string]string{
-						child.valueCol: formatLiteral(item, child.Schema),
+						child.valueCol: schema.FormatLiteral(item, child.Schema),
 					}, pkl, i+1)
 				} else {
 					itemVals, gerr := m.gatherRowValues(child, item, nil)
@@ -276,7 +278,7 @@ func navigatePath(v interface{}, path []string) interface{} {
 			key = seg
 		} else {
 			for k := range m {
-				if toSnake(k) == seg {
+				if schema.ToSnake(k) == seg {
 					key = k
 					break
 				}
@@ -292,5 +294,5 @@ func navigatePath(v interface{}, path []string) interface{} {
 
 func renderInsert(table string, cols, lits []string) string {
 	return fmt.Sprintf("INSERT INTO %s (%s)\nVALUES (%s);\n",
-		quoteIdent(table), strings.Join(cols, ", "), strings.Join(lits, ", "))
+		schema.QuoteIdent(table), strings.Join(cols, ", "), strings.Join(lits, ", "))
 }

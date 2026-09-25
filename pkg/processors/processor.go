@@ -8,7 +8,7 @@ import (
 
 	"github.com/warpstreamlabs/bento/v4/public/service"
 
-	st "github.com/laurentpoirierfr/schema-to-table/internal/service"
+	normalized "github.com/laurentpoirierfr/schema-to-table/internal/normalized"
 )
 
 // batchProcessor implements service.BatchProcessor for both the insert and
@@ -80,7 +80,7 @@ func (p *batchProcessor) storeMessage(ctx context.Context, tr tx, msg *service.M
 		return err
 	}
 
-	model, err := st.PlanModel(schemaDoc, tableName, p.cfg.pk, p.cfg.headers)
+	model, err := normalized.Plan(schemaDoc, tableName, p.cfg.pk, p.cfg.headers)
 	if err != nil {
 		return fmt.Errorf("plan model from schema %s: %w", schemaURL, err)
 	}
@@ -123,7 +123,7 @@ func (p *batchProcessor) storeMessage(ctx context.Context, tr tx, msg *service.M
 // transaction): every typed table first, then the denormalized views, then
 // the schema registry. The root table's existence guards the whole object,
 // so creations are skipped once it is known to exist for this table.
-func (p *batchProcessor) ensureModel(ctx context.Context, tr tx, tableName string, model *st.Model, ensured map[string]bool) error {
+func (p *batchProcessor) ensureModel(ctx context.Context, tr tx, tableName string, model *normalized.Model, ensured map[string]bool) error {
 	if !p.cfg.createModel {
 		return nil
 	}

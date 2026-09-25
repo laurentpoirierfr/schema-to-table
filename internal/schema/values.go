@@ -1,4 +1,4 @@
-package service
+package schema
 
 import (
 	"encoding/json"
@@ -7,18 +7,18 @@ import (
 	"strings"
 )
 
-// collectValues (stage 3) mirrors walkSchema, but reads actual values out
-// of dataNode (the unmarshalled JSON payload) at each property path and
+// CollectValues mirrors the column-planning walks, but reads actual values
+// out of dataNode (the unmarshalled JSON payload) at each property path and
 // stores them in out, keyed by the sanitized column name. Columns present
 // in the schema but absent from the payload simply never appear — the SQL
 // rendering stage turns those into NULL, guaranteeing that value order
 // always matches the planned column order.
-func collectValues(prefix string, s, root *jsonSchema, dataNode interface{}, complexType string, out map[string]string, visited map[*jsonSchema]bool) error {
+func CollectValues(prefix string, s, root *Node, dataNode interface{}, complexType string, out map[string]string, visited map[*Node]bool) error {
 	if s == nil {
 		return nil
 	}
 
-	resolved, err := resolveRef(s, root)
+	resolved, err := Resolve(s, root)
 	if err != nil {
 		return err
 	}
@@ -29,13 +29,13 @@ func collectValues(prefix string, s, root *jsonSchema, dataNode interface{}, com
 	defer delete(visited, resolved)
 
 	for _, sub := range resolved.AllOf {
-		if err := collectValues(prefix, sub, root, dataNode, complexType, out, visited); err != nil {
+		if err := CollectValues(prefix, sub, root, dataNode, complexType, out, visited); err != nil {
 			return err
 		}
 	}
 
-	for _, sub := range append(append([]*jsonSchema{}, resolved.OneOf...), resolved.AnyOf...) {
-		if err := collectValues(prefix, sub, root, dataNode, complexType, out, visited); err != nil {
+	for _, sub := range append(append([]*Node{}, resolved.OneOf...), resolved.AnyOf...) {
+		if err := CollectValues(prefix, sub, root, dataNode, complexType, out, visited); err != nil {
 			return err
 		}
 	}
@@ -44,40 +44,40 @@ func collectValues(prefix string, s, root *jsonSchema, dataNode interface{}, com
 		return nil
 	}
 
-	for _, key := range sortedKeys(resolved.Properties) {
+	for _, key := range SortedKeys(resolved.Properties) {
 		prop := resolved.Properties[key]
-		segment := toSnake(key)
+		segment := ToSnake(key)
 		childPrefix := segment
 		if prefix != "" {
 			childPrefix = prefix + "_" + segment
 		}
 		childData := getChild(dataNode, key)
 
-		propResolved, err := resolveRef(prop, root)
+		propResolved, err := Resolve(prop, root)
 		if err != nil {
 			return err
 		}
 
 		switch {
-		case propResolved.Items != nil || primaryType(propResolved) == "array":
-			out[sanitizeIdent(childPrefix)] = serializeComplex(childData, complexType)
+		case propResolved.Items != nil || PrimaryType(propResolved) == "array":
+			out[SanitizeIdent(childPrefix)] = SerializeComplex(childData, complexType)
 		case len(propResolved.Properties) > 0 || len(propResolved.AllOf) > 0 ||
 			len(propResolved.OneOf) > 0 || len(propResolved.AnyOf) > 0:
-			if err := collectValues(childPrefix, propResolved, root, childData, complexType, out, visited); err != nil {
+			if err := CollectValues(childPrefix, propResolved, root, childData, complexType, out, visited); err != nil {
 				return err
 			}
-		case primaryType(propResolved) == "object":
-			out[sanitizeIdent(childPrefix)] = serializeComplex(childData, complexType)
+		case PrimaryType(propResolved) == "object":
+			out[SanitizeIdent(childPrefix)] = SerializeComplex(childData, complexType)
 		default:
-			out[sanitizeIdent(childPrefix)] = formatLiteral(childData, propResolved)
+			out[SanitizeIdent(childPrefix)] = FormatLiteral(childData, propResolved)
 		}
 	}
 
 	return nil
 }
 
-// parsePayload unmarshals a JSON document for the value stage.
-func parsePayload(data string) (interface{}, error) {
+// ParsePayload unmarshals a JSON document for the value stage.
+func ParsePayload(data string) (interface{}, error) {
 	var dataNode interface{}
 	if err := json.Unmarshal([]byte(data), &dataNode); err != nil {
 		return nil, fmt.Errorf("invalid data: %w", err)
@@ -95,9 +95,9 @@ func getChild(dataNode interface{}, key string) interface{} {
 	return m[key]
 }
 
-// serializeComplex renders an array/object value as a JSON-text SQL
+// SerializeComplex renders an array/object value as a JSON-text SQL
 // literal, cast to complexType when it looks like a JSON(B) column.
-func serializeComplex(v interface{}, complexType string) string {
+func SerializeComplex(v interface{}, complexType string) string {
 	if v == nil {
 		return "NULL"
 	}
@@ -105,29 +105,29 @@ func serializeComplex(v interface{}, complexType string) string {
 	if err != nil {
 		return "NULL"
 	}
-	lit := quoteLiteral(string(raw))
+	lit := QuoteLiteral(string(raw))
 	if strings.Contains(strings.ToUpper(complexType), "JSON") {
 		return lit + "::" + complexType
 	}
 	return lit
 }
 
-// formatLiteral renders a scalar JSON value (as produced by
+// FormatLiteral renders a scalar JSON value (as produced by
 // encoding/json's default unmarshalling into interface{}) as a SQL literal.
-func formatLiteral(v interface{}, s *jsonSchema) string {
+func FormatLiteral(v interface{}, s *Node) string {
 	if v == nil {
 		return "NULL"
 	}
 	switch val := v.(type) {
 	case string:
-		return quoteLiteral(val)
+		return QuoteLiteral(val)
 	case bool:
 		if val {
 			return "TRUE"
 		}
 		return "FALSE"
 	case float64:
-		if primaryType(s) == "integer" {
+		if PrimaryType(s) == "integer" {
 			return strconv.FormatInt(int64(val), 10)
 		}
 		return strconv.FormatFloat(val, 'f', -1, 64)
@@ -137,6 +137,6 @@ func formatLiteral(v interface{}, s *jsonSchema) string {
 		if err != nil {
 			return "NULL"
 		}
-		return quoteLiteral(string(raw))
+		return QuoteLiteral(string(raw))
 	}
 }

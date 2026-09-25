@@ -3,7 +3,9 @@ package processors
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/warpstreamlabs/bento/v4/public/service"
 
-	st "github.com/laurentpoirierfr/schema-to-table/internal/service"
+	normalized "github.com/laurentpoirierfr/schema-to-table/internal/normalized"
 )
 
 const testSchema = `{
@@ -39,14 +41,22 @@ type fakeSink struct {
 	commits   int
 	rollbacks int
 	failExec  error
+	failErrs  []error // per-Exec error queue, consumed in order
+	pingErr   error
+	beginErr  error
+	commitErr error
+	existsErr error
 }
 
 func newFakeSink() *fakeSink {
 	return &fakeSink{exists: map[string]bool{}, created: map[string]bool{}}
 }
 
-func (s *fakeSink) Ping(context.Context) error { return nil }
+func (s *fakeSink) Ping(context.Context) error { return s.pingErr }
 func (s *fakeSink) Begin(context.Context) (tx, error) {
+	if s.beginErr != nil {
+		return nil, s.beginErr
+	}
 	s.txns++
 	return &fakeTx{s: s}, nil
 }
@@ -55,7 +65,13 @@ func (s *fakeSink) Close() error { return nil }
 type fakeTx struct{ s *fakeSink }
 
 func (t *fakeTx) Exec(_ context.Context, query string) error {
-	if t.s.failExec != nil {
+	if len(t.s.failErrs) > 0 {
+		err := t.s.failErrs[0]
+		t.s.failErrs = t.s.failErrs[1:]
+		if err != nil {
+			return err
+		}
+	} else if t.s.failExec != nil {
 		return t.s.failExec
 	}
 	t.s.execs = append(t.s.execs, query)
@@ -66,9 +82,15 @@ func (t *fakeTx) Exec(_ context.Context, query string) error {
 }
 
 func (t *fakeTx) TableExists(_ context.Context, name string) (bool, error) {
+	if t.s.existsErr != nil {
+		return false, t.s.existsErr
+	}
 	return t.s.exists[name] || t.s.created[name], nil
 }
 func (t *fakeTx) Commit() error {
+	if t.s.commitErr != nil {
+		return t.s.commitErr
+	}
 	t.s.commits++
 	return nil
 }
@@ -177,7 +199,7 @@ type testMsg struct {
 // DML, computed through the very same pipeline the processor uses.
 func expectedModelExecs(t *testing.T, schemaDoc, table, pk string, upsert bool, msgs []testMsg) []string {
 	t.Helper()
-	model, err := st.PlanModel(schemaDoc, table, pk, map[string]string{"source": "TEXT"})
+	model, err := normalized.Plan(schemaDoc, table, pk, map[string]string{"source": "TEXT"})
 	if err != nil {
 		t.Fatalf("PlanModel: %v", err)
 	}
@@ -212,7 +234,7 @@ func expectedModelExecs(t *testing.T, schemaDoc, table, pk string, upsert bool, 
 // creation disabled).
 func expectedDMLExecs(t *testing.T, schemaDoc, table, pk string, upsert bool, msgs []testMsg) []string {
 	t.Helper()
-	model, err := st.PlanModel(schemaDoc, table, pk, map[string]string{"source": "TEXT"})
+	model, err := normalized.Plan(schemaDoc, table, pk, map[string]string{"source": "TEXT"})
 	if err != nil {
 		t.Fatalf("PlanModel: %v", err)
 	}
@@ -276,6 +298,14 @@ func TestRegistration(t *testing.T) {
 	if registrationErr != nil {
 		t.Fatalf("init registration failed: %v", registrationErr)
 	}
+	// Both components must be resolvable through the global environment.
+	env := service.NewEnvironment()
+	if _, ok := env.GetProcessorConfig(insertProcessorName); !ok {
+		t.Errorf("%s not registered", insertProcessorName)
+	}
+	if _, ok := env.GetProcessorConfig(upsertProcessorName); !ok {
+		t.Errorf("%s not registered", upsertProcessorName)
+	}
 }
 
 func TestConfigValidation(t *testing.T) {
@@ -310,6 +340,17 @@ func TestConfigValidation(t *testing.T) {
 	}
 	if _, err := newInsertProcessor(pConf, nil); err == nil {
 		t.Fatal("expected empty pk error, got nil")
+	}
+
+	// Empty header field names are refused.
+	for _, field := range []string{"schema_url_header", "table_name_header"} {
+		pConf, err = insertSpec().ParseYAML(fmt.Sprintf("dsn: postgres://h/db\n%s: \"\"", field), nil)
+		if err != nil {
+			t.Fatalf("parse (%s): %v", field, err)
+		}
+		if _, err := newInsertProcessor(pConf, nil); err == nil {
+			t.Errorf("expected empty %s error, got nil", field)
+		}
 	}
 }
 
@@ -390,7 +431,7 @@ create_model: true
 		t.Fatalf("ProcessBatch: %v", err)
 	}
 
-	model, err := st.PlanModel(testSchema, "landing_test", "id", spec)
+	model, err := normalized.Plan(testSchema, "landing_test", "id", spec)
 	if err != nil {
 		t.Fatalf("PlanModel: %v", err)
 	}
@@ -566,4 +607,352 @@ func TestMultiTableBatch(t *testing.T) {
 		{payload: `{"id":2,"name":"beta"}`, headers: map[string]string{"source": ""}},
 	})...)
 	assertExecs(t, sink, want)
+}
+
+func TestMissingSchemaURLHeader(t *testing.T) {
+	sink := newFakeSink()
+	proc := newTestProcessor(t, false, baseYAML(), sink)
+
+	batch := service.MessageBatch{
+		message(`{"id":1,"name":"alpha"}`, map[string]string{"table_name": "landing_test"}),
+	}
+	if _, err := proc.ProcessBatch(context.Background(), batch); err == nil {
+		t.Fatal("expected error for missing schema_url header, got nil")
+	}
+	if sink.rollbacks != 1 || sink.commits != 0 || len(sink.execs) != 0 {
+		t.Errorf("expected full rollback: txns=%d commits=%d rollbacks=%d execs=%d",
+			sink.txns, sink.commits, sink.rollbacks, len(sink.execs))
+	}
+}
+
+func TestBlankTableNameHeader(t *testing.T) {
+	srv, _ := schemaServer(t, testSchema)
+	sink := newFakeSink()
+	proc := newTestProcessor(t, false, baseYAML(), sink)
+
+	batch := service.MessageBatch{
+		message(`{"id":1,"name":"alpha"}`, map[string]string{
+			"table_name": "   ", "schema_url": srv.URL,
+		}),
+	}
+	if _, err := proc.ProcessBatch(context.Background(), batch); err == nil {
+		t.Fatal("expected error for blank table_name header, got nil")
+	}
+	if sink.rollbacks != 1 || sink.commits != 0 {
+		t.Errorf("expected rollback, no commit: commits=%d rollbacks=%d", sink.commits, sink.rollbacks)
+	}
+}
+
+func TestSchemaFetchError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	sink := newFakeSink()
+	proc := newTestProcessor(t, false, baseYAML(), sink)
+	batch := service.MessageBatch{
+		message(`{"id":1,"name":"alpha"}`, map[string]string{
+			"table_name": "landing_test", "schema_url": srv.URL,
+		}),
+	}
+	_, err := proc.ProcessBatch(context.Background(), batch)
+	if err == nil {
+		t.Fatal("expected error fetching the schema, got nil")
+	}
+	if !strings.Contains(err.Error(), "HTTP 500") {
+		t.Errorf("expected HTTP status in the error, got: %v", err)
+	}
+	if sink.commits != 0 || sink.rollbacks != 1 {
+		t.Errorf("expected rollback, no commit: commits=%d rollbacks=%d", sink.commits, sink.rollbacks)
+	}
+}
+
+func TestInvalidSchemaDocument(t *testing.T) {
+	srv, _ := schemaServer(t, "{ not json")
+	sink := newFakeSink()
+	proc := newTestProcessor(t, false, baseYAML(), sink)
+
+	batch := service.MessageBatch{
+		message(`{"id":1,"name":"alpha"}`, map[string]string{
+			"table_name": "landing_test", "schema_url": srv.URL,
+		}),
+	}
+	_, err := proc.ProcessBatch(context.Background(), batch)
+	if err == nil {
+		t.Fatal("expected error planning the model from an invalid schema, got nil")
+	}
+	if !strings.Contains(err.Error(), "plan model") {
+		t.Errorf("expected a plan-model error, got: %v", err)
+	}
+	if sink.commits != 0 || sink.rollbacks != 1 {
+		t.Errorf("expected rollback, no commit: commits=%d rollbacks=%d", sink.commits, sink.rollbacks)
+	}
+}
+
+// TestDdlAlreadyExistsTolerated checks that a concurrent stream already
+// owning the model does not abort the batch: CREATE ... already exists is
+// skipped, the rest of the model and the DML still run and commit.
+func TestDdlAlreadyExistsTolerated(t *testing.T) {
+	srv, _ := schemaServer(t, testSchema)
+	sink := newFakeSink()
+	sink.failErrs = []error{
+		&pgconn.PgError{Code: "42P07"},
+		&pgconn.PgError{Code: "42P16"},
+	}
+	proc := newTestProcessor(t, true, baseYAML(), sink)
+
+	if _, err := proc.ProcessBatch(context.Background(), twoMessages(srv.URL)); err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if sink.commits != 1 || sink.rollbacks != 0 {
+		t.Errorf("txn accounting: commits=%d rollbacks=%d", sink.commits, sink.rollbacks)
+	}
+
+	// Both per-table DDL strings hit "already exists" and were skipped; only
+	// the view, the registry and the DML statements were executed and stored.
+	model, err := normalized.Plan(testSchema, "landing_test", "id", map[string]string{"source": "TEXT"})
+	if err != nil {
+		t.Fatalf("PlanModel: %v", err)
+	}
+	var want []string
+	for _, render := range []func() ([]string, error){model.ViewStatements, model.RegistryStatements} {
+		stmts, err := render()
+		if err != nil {
+			t.Fatalf("render DDL: %v", err)
+		}
+		want = append(want, stmts...)
+	}
+	for _, m := range []testMsg{
+		{payload: `{"id":1,"name":"alpha","tags":["a","b"]}`, headers: map[string]string{"source": "api"}},
+		{payload: `{"id":2,"name":"beta","tags":[]}`, headers: map[string]string{"source": ""}},
+	} {
+		stmts, err := model.UpsertStatements(m.headers, m.payload, "id")
+		if err != nil {
+			t.Fatalf("render DML: %v", err)
+		}
+		want = append(want, stmts...)
+	}
+	assertExecs(t, sink, want)
+}
+
+func TestBeginError(t *testing.T) {
+	srv, _ := schemaServer(t, testSchema)
+	sink := newFakeSink()
+	sink.beginErr = errors.New("no connections left")
+	proc := newTestProcessor(t, false, baseYAML(), sink)
+
+	_, err := proc.ProcessBatch(context.Background(), twoMessages(srv.URL))
+	if err == nil || !strings.Contains(err.Error(), "begin transaction") {
+		t.Fatalf("expected a begin-transaction error, got: %v", err)
+	}
+	if sink.txns != 0 || sink.commits != 0 || sink.rollbacks != 0 {
+		t.Errorf("no transaction should have started: txns=%d commits=%d rollbacks=%d",
+			sink.txns, sink.commits, sink.rollbacks)
+	}
+}
+
+func TestCommitError(t *testing.T) {
+	srv, _ := schemaServer(t, testSchema)
+	sink := newFakeSink()
+	sink.commitErr = errors.New("commit boom")
+	proc := newTestProcessor(t, false, baseYAML(), sink)
+
+	if _, err := proc.ProcessBatch(context.Background(), twoMessages(srv.URL)); err == nil {
+		t.Fatal("expected commit error, got nil")
+	}
+	if sink.commits != 0 || sink.rollbacks != 1 {
+		t.Errorf("expected the deferred rollback after a failed commit: commits=%d rollbacks=%d",
+			sink.commits, sink.rollbacks)
+	}
+}
+
+// TestSinkPingFailure exercises the lazy-connect path of ensureSink against a
+// port that is guaranteed closed (a listener we create and immediately drop).
+func TestSinkPingFailure(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	pConf, err := insertSpec().ParseYAML(fmt.Sprintf(
+		"dsn: postgres://u:p@127.0.0.1:%d/db?sslmode=disable&connect_timeout=1\npk: id\n", port), nil)
+	if err != nil {
+		t.Fatalf("parse yaml: %v", err)
+	}
+	cfg, err := parseConfig(pConf)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	bp := &batchProcessor{cfg: cfg, loader: newSchemaLoader()}
+	t.Cleanup(func() { _ = bp.Close(context.Background()) })
+
+	batch := service.MessageBatch{message(`{"id":1}`, nil)}
+	if _, err := bp.ProcessBatch(context.Background(), batch); err == nil || !strings.Contains(err.Error(), "connect:") {
+		t.Fatalf("expected a connect error, got: %v", err)
+	}
+	if bp.opened || bp.sink != nil {
+		t.Error("processor must stay unopened after a failed connect")
+	}
+}
+
+func TestCloseWhenNotOpened(t *testing.T) {
+	bp := &batchProcessor{cfg: &processorConfig{dsn: "postgres://u:p@localhost/db"}, loader: newSchemaLoader()}
+	if err := bp.Close(context.Background()); err != nil {
+		t.Fatalf("Close on a never-opened processor must return nil, got: %v", err)
+	}
+}
+
+func TestExecutionOrderPreserved(t *testing.T) {
+	srv, _ := schemaServer(t, testSchema)
+	sink := newFakeSink()
+	proc := newTestProcessor(t, false, baseYAML(), sink)
+
+	if _, err := proc.ProcessBatch(context.Background(), twoMessages(srv.URL)); err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+
+	// Every statement of the first message's model must precede the DML of the
+	// first message, well before the DML of the second.
+	all := strings.Join(sink.execs, "\n")
+	first := strings.Index(all, "'alpha'")
+	second := strings.Index(all, "'beta'")
+	if first < 0 || second < 0 || first > second {
+		t.Errorf("expected per-message DML in batch order:\n%s", all)
+	}
+}
+
+// TestDdlStageFailure covers the propagation (and rollback) of a DDL failure
+// in every stage of the on-hold model creation: per-table CREATE, the
+// denormalized views and the registry.
+func TestDdlStageFailure(t *testing.T) {
+	stages := []struct {
+		name string
+		// failures are consumed before each expected statement while the
+		// model is created for testSchema: 2 table DDL, 1 view, 1 registry.
+		failures []error
+		wantText string
+	}{
+		{"create", []error{&pgconn.PgError{Code: "23505"}}, "ensure model"},
+		{"view", []error{nil, nil, errors.New("view boom")}, "ensure model"},
+		{"registry", []error{nil, nil, nil, errors.New("registry boom")}, "ensure model"},
+	}
+	for _, tt := range stages {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := schemaServer(t, testSchema)
+			sink := newFakeSink()
+			sink.failErrs = tt.failures
+			proc := newTestProcessor(t, false, baseYAML(), sink)
+
+			batch := service.MessageBatch{
+				message(`{"id":1,"name":"alpha"}`, map[string]string{
+					"table_name": "landing_test", "schema_url": srv.URL, "source": "api",
+				}),
+			}
+			_, err := proc.ProcessBatch(context.Background(), batch)
+			if err == nil {
+				t.Fatal("expected a DDL failure, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantText) {
+				t.Errorf("error %q does not mention %q", err, tt.wantText)
+			}
+			if sink.commits != 0 || sink.rollbacks != 1 {
+				t.Errorf("expected rollback, no commit: commits=%d rollbacks=%d", sink.commits, sink.rollbacks)
+			}
+		})
+	}
+}
+
+// TestDmlFailureAfterDdl covers the error branch of the per-message statement
+// loop: the model DDL succeeds, then a DML statement fails and the whole
+// batch rolls back (nothing committed, rollback called).
+func TestDmlFailureAfterDdl(t *testing.T) {
+	srv, _ := schemaServer(t, testSchema)
+	sink := newFakeSink()
+	// 2 table DDL + 1 view + 1 registry succeed, then the root INSERT fails.
+	sink.failErrs = []error{nil, nil, nil, nil, errors.New("dml boom")}
+	proc := newTestProcessor(t, false, baseYAML(), sink)
+
+	batch := service.MessageBatch{
+		message(`{"id":1,"name":"alpha"}`, map[string]string{
+			"table_name": "landing_test", "schema_url": srv.URL, "source": "api",
+		}),
+	}
+	_, err := proc.ProcessBatch(context.Background(), batch)
+	if err == nil || !strings.Contains(err.Error(), "dml boom") {
+		t.Fatalf("expected the dml failure, got: %v", err)
+	}
+	if sink.commits != 0 || sink.rollbacks != 1 {
+		t.Errorf("expected rollback, no commit: commits=%d rollbacks=%d", sink.commits, sink.rollbacks)
+	}
+	// Only the DDL statements were attempted; the failed INSERT did not land.
+	if len(sink.execs) != 4 {
+		t.Errorf("expected exactly the 4 DDL statements to be recorded, got %d", len(sink.execs))
+	}
+}
+
+// TestTableExistsError covers the propagation (and rollback) of a failure
+// while probing the existence of the root table.
+func TestTableExistsError(t *testing.T) {
+	srv, _ := schemaServer(t, testSchema)
+	sink := newFakeSink()
+	sink.existsErr = errors.New("catalog gone")
+	proc := newTestProcessor(t, false, baseYAML(), sink)
+
+	_, err := proc.ProcessBatch(context.Background(), twoMessages(srv.URL))
+	if err == nil || !strings.Contains(err.Error(), "catalog gone") {
+		t.Fatalf("expected the catalog error, got: %v", err)
+	}
+	if sink.commits != 0 || sink.rollbacks != 1 {
+		t.Errorf("expected rollback, no commit: commits=%d rollbacks=%d", sink.commits, sink.rollbacks)
+	}
+}
+
+// TestParseConfigMissingFields covers the defensive field-access errors of
+// parseConfig, reached when the config does not declare every field the
+// processors rely on.
+func TestParseConfigMissingFields(t *testing.T) {
+	ctor := map[string]func(name string) *service.ConfigField{
+		"schema_url_header": service.NewStringField,
+		"table_name_header": service.NewStringField,
+		"pk":                service.NewStringField,
+		"headers":           service.NewStringMapField,
+		"create_model":      service.NewBoolField,
+	}
+	// ParseYAML is fed a spec without the target field: the accessor inside
+	// parseConfig then fails with "field ... was not present".
+	tests := []struct {
+		name   string
+		absent string
+		kept   []string
+	}{
+		{"no schema_url_header", "schema_url_header", []string{"table_name_header", "pk"}},
+		{"no table_name_header", "table_name_header", []string{"schema_url_header", "pk"}},
+		{"no pk", "pk", []string{"schema_url_header", "table_name_header"}},
+		{"no headers", "headers", []string{"schema_url_header", "table_name_header", "pk"}},
+		{"no create_model", "create_model", []string{"schema_url_header", "table_name_header", "pk", "headers"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fields := []*service.ConfigField{service.NewStringField("dsn")}
+			yaml := "dsn: x\n"
+			for _, k := range tt.kept {
+				fields = append(fields, ctor[k](k))
+				if k == "headers" {
+					yaml += "headers: {}\n"
+				} else {
+					yaml += k + ": y\n"
+				}
+			}
+			conf, err := service.NewConfigSpec().Fields(fields...).ParseYAML(yaml, nil)
+			if err != nil {
+				t.Fatalf("parse config: %v", err)
+			}
+			if _, err := parseConfig(conf); err == nil || !strings.Contains(err.Error(), tt.absent) {
+				t.Errorf("expected a field error mentioning %q, got: %v", tt.absent, err)
+			}
+		})
+	}
 }

@@ -1,40 +1,14 @@
-package service
+package landing
 
 import (
 	"fmt"
 	"strings"
+
+	"github.com/laurentpoirierfr/schema-to-table/internal/schema"
 )
 
-// CreateTable (stage 4) renders a "CREATE TABLE" statement for a
-// PostgreSQL landing table named tableName, from the planned column list
-// produced by Columns.
-//
-// headers is the same map accepted by Columns: key → SQL type for each
-// extra ingestion column ("header_<key>").
-func (t *Table) CreateTable(tableName string, headers map[string]string) (string, error) {
-	if strings.TrimSpace(tableName) == "" {
-		return "", fmt.Errorf("CreateTable: tableName is required")
-	}
-	cols, err := t.Columns(headers)
-	if err != nil {
-		return "", err
-	}
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "CREATE TABLE %s (\n", quoteIdent(tableName))
-	for i, c := range cols {
-		sep := ","
-		if i == len(cols)-1 {
-			sep = ""
-		}
-		fmt.Fprintf(&b, "    %s %s%s\n", quoteIdent(c.Name), c.Type, sep)
-	}
-	b.WriteString(");\n")
-	return b.String(), nil
-}
-
-// Insert (stage 4) renders an "INSERT INTO" statement for tableName,
-// targeting exactly the columns Columns would plan for the same schema.
+// Insert renders an "INSERT INTO" statement for tableName, targeting
+// exactly the columns Columns would plan for the same schema.
 //
 // headerValues holds the actual values for the extra ingestion columns
 // (each becomes "header_<key>", values quoted as string literals).
@@ -53,21 +27,20 @@ func (t *Table) Insert(tableName string, headerValues map[string]string, data st
 	}
 	quoted := make([]string, len(cols))
 	for i, c := range cols {
-		quoted[i] = quoteIdent(c)
+		quoted[i] = schema.QuoteIdent(c)
 	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "INSERT INTO %s (%s)\nVALUES (%s);\n",
-		quoteIdent(tableName), strings.Join(quoted, ", "), strings.Join(lits, ", "))
+		schema.QuoteIdent(tableName), strings.Join(quoted, ", "), strings.Join(lits, ", "))
 	return b.String(), nil
 }
 
-// Upsert (stage 4) renders an "INSERT … ON CONFLICT (…) DO UPDATE"
-// statement: same shape as Insert, plus a upsert on conflictColumn (a
-// business key such as "id" or "header_source"). conflictColumn must be
-// one of the generated columns; on conflict every other column is
-// overwritten with the new value (EXCLUDED.<column>), conflictColumn
-// itself is left untouched.
+// Upsert renders an "INSERT … ON CONFLICT (…) DO UPDATE" statement: same
+// shape as Insert, plus a upsert on conflictColumn (a business key such as
+// "id" or "header_source"). conflictColumn must be one of the generated
+// columns; on conflict every other column is overwritten with the new
+// value (EXCLUDED.<column>), conflictColumn itself is left untouched.
 func (t *Table) Upsert(tableName string, headerValues map[string]string, data string, conflictColumn string) (string, error) {
 	if strings.TrimSpace(tableName) == "" {
 		return "", fmt.Errorf("Upsert: tableName is required")
@@ -75,7 +48,7 @@ func (t *Table) Upsert(tableName string, headerValues map[string]string, data st
 	if strings.TrimSpace(conflictColumn) == "" {
 		return "", fmt.Errorf("Upsert: conflictColumn is required")
 	}
-	conflictColumn = sanitizeIdent(conflictColumn)
+	conflictColumn = schema.SanitizeIdent(conflictColumn)
 
 	cols, lits, err := t.renderValues(headerValues, data)
 	if err != nil {
@@ -83,7 +56,7 @@ func (t *Table) Upsert(tableName string, headerValues map[string]string, data st
 	}
 	quoted := make([]string, len(cols))
 	for i, c := range cols {
-		quoted[i] = quoteIdent(c)
+		quoted[i] = schema.QuoteIdent(c)
 	}
 
 	found := false
@@ -93,7 +66,7 @@ func (t *Table) Upsert(tableName string, headerValues map[string]string, data st
 			found = true
 			continue
 		}
-		updates = append(updates, fmt.Sprintf("%s = EXCLUDED.%s", quoteIdent(c), quoteIdent(c)))
+		updates = append(updates, fmt.Sprintf("%s = EXCLUDED.%s", schema.QuoteIdent(c), schema.QuoteIdent(c)))
 	}
 	if !found {
 		return "", fmt.Errorf("Upsert: conflict column %q is not among the generated columns", conflictColumn)
@@ -104,32 +77,33 @@ func (t *Table) Upsert(tableName string, headerValues map[string]string, data st
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "INSERT INTO %s (%s)\nVALUES (%s)\nON CONFLICT (%s) DO UPDATE SET\n    %s;\n",
-		quoteIdent(tableName), strings.Join(quoted, ", "), strings.Join(lits, ", "),
-		quoteIdent(conflictColumn), strings.Join(updates, ",\n    "))
+		schema.QuoteIdent(tableName), strings.Join(quoted, ", "), strings.Join(lits, ", "),
+		schema.QuoteIdent(conflictColumn), strings.Join(updates, ",\n    "))
 	return b.String(), nil
 }
 
-// renderValues runs stages 2+3 together: it plans the column order from
-// the schema, collects the payload's literals for those columns, and
-// returns aligned column-name and literal slices (missing values → NULL).
+// renderValues runs the plan + value stages together: it plans the column
+// order from the schema, collects the payload's literals for those
+// columns, and returns aligned column-name and literal slices (missing
+// values → NULL).
 func (t *Table) renderValues(headerValues map[string]string, data string) (cols, lits []string, err error) {
 	// Header columns always come first, sorted — same as the plan stage.
-	headerKeys := sortedKeys(headerValues)
+	headerKeys := schema.SortedKeys(headerValues)
 	planned, err := t.Columns(headerTypeShim(headerKeys))
 	if err != nil {
 		return nil, nil, err
 	}
 
-	dataNode, err := parsePayload(data)
+	dataNode, err := schema.ParsePayload(data)
 	if err != nil {
 		return nil, nil, fmt.Errorf("render values: %w", err)
 	}
 
 	values := map[string]string{}
 	for _, k := range headerKeys {
-		values[sanitizeIdent("header_"+k)] = quoteLiteral(headerValues[k])
+		values[schema.SanitizeIdent("header_"+k)] = schema.QuoteLiteral(headerValues[k])
 	}
-	if err := collectValues("", t.root, t.root, dataNode, t.complexType, values, map[*jsonSchema]bool{}); err != nil {
+	if err := schema.CollectValues("", t.root, t.root, dataNode, t.complexType, values, map[*schema.Node]bool{}); err != nil {
 		return nil, nil, fmt.Errorf("render values: %w", err)
 	}
 

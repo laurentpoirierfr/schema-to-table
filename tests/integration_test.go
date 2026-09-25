@@ -20,7 +20,8 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/laurentpoirierfr/schema-to-table/internal/service"
+	"github.com/laurentpoirierfr/schema-to-table/internal/landing"
+	"github.com/laurentpoirierfr/schema-to-table/internal/normalized"
 )
 
 // integrationDB opens the test database, skipping when unreachable.
@@ -145,7 +146,7 @@ func TestIntegrationAllScenarios(t *testing.T) {
 		t.Run(filepath.Base(sc.Dir), func(t *testing.T) {
 			dropTables(t, db, sc)
 
-			tbl, err := service.New(sc.schemaDoc(t), "JSONB")
+			tbl, err := landing.Parse(sc.schemaDoc(t), "JSONB")
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -175,7 +176,7 @@ func TestIntegrationAllScenariosModelNormalized(t *testing.T) {
 	for _, sc := range findScenarios(t) {
 		sc := sc
 		t.Run(filepath.Base(sc.Dir), func(t *testing.T) {
-			model, err := service.PlanModel(sc.schemaDoc(t), sc.Table, sc.PK, sc.Headers)
+			model, err := normalized.Plan(sc.schemaDoc(t), sc.Table, sc.PK, sc.Headers)
 			if err != nil {
 				t.Fatalf("PlanModel: %v", err)
 			}
@@ -268,7 +269,7 @@ func readFile(t *testing.T, path string) string {
 	return string(b)
 }
 
-func mustCreate(t *testing.T, tbl *service.Table, sc scenario) string {
+func mustCreate(t *testing.T, tbl *landing.Table, sc scenario) string {
 	t.Helper()
 	s, err := tbl.CreateTable(sc.Table, sc.Headers)
 	if err != nil {
@@ -277,7 +278,7 @@ func mustCreate(t *testing.T, tbl *service.Table, sc scenario) string {
 	return s
 }
 
-func mustInsert(t *testing.T, tbl *service.Table, table, name, data string) string {
+func mustInsert(t *testing.T, tbl *landing.Table, table, name, data string) string {
 	t.Helper()
 	s, err := tbl.Insert(table, headerVals(name), data)
 	if err != nil {
@@ -286,7 +287,7 @@ func mustInsert(t *testing.T, tbl *service.Table, table, name, data string) stri
 	return s
 }
 
-func mustUpsert(t *testing.T, tbl *service.Table, sc scenario, name, data string) string {
+func mustUpsert(t *testing.T, tbl *landing.Table, sc scenario, name, data string) string {
 	t.Helper()
 	s, err := tbl.Upsert(sc.Table, headerVals(name), data, sc.PK)
 	if err != nil {
@@ -295,7 +296,7 @@ func mustUpsert(t *testing.T, tbl *service.Table, sc scenario, name, data string
 	return s
 }
 
-func mustCreateModelStatements(t *testing.T, m *service.Model) []string {
+func mustCreateModelStatements(t *testing.T, m *normalized.Model) []string {
 	t.Helper()
 	ss, err := m.CreateStatements()
 	if err != nil {
@@ -304,7 +305,7 @@ func mustCreateModelStatements(t *testing.T, m *service.Model) []string {
 	return ss
 }
 
-func mustViewModelStatements(t *testing.T, m *service.Model) []string {
+func mustViewModelStatements(t *testing.T, m *normalized.Model) []string {
 	t.Helper()
 	ss, err := m.ViewStatements()
 	if err != nil {
@@ -313,7 +314,7 @@ func mustViewModelStatements(t *testing.T, m *service.Model) []string {
 	return ss
 }
 
-func mustRegistryStatements(t *testing.T, m *service.Model) []string {
+func mustRegistryStatements(t *testing.T, m *normalized.Model) []string {
 	t.Helper()
 	ss, err := m.RegistryStatements()
 	if err != nil {
@@ -322,7 +323,7 @@ func mustRegistryStatements(t *testing.T, m *service.Model) []string {
 	return ss
 }
 
-func mustInsertModelStatements(t *testing.T, m *service.Model, name, data string, headers map[string]string) []string {
+func mustInsertModelStatements(t *testing.T, m *normalized.Model, name, data string, headers map[string]string) []string {
 	t.Helper()
 	// headers type map isn't needed for DML, only root ingest values.
 	ss, err := m.InsertStatements(headerVals(name), data)
@@ -332,7 +333,7 @@ func mustInsertModelStatements(t *testing.T, m *service.Model, name, data string
 	return ss
 }
 
-func mustUpsertModelStatements(t *testing.T, m *service.Model, name, data string, headers map[string]string, pk string) []string {
+func mustUpsertModelStatements(t *testing.T, m *normalized.Model, name, data string, headers map[string]string, pk string) []string {
 	t.Helper()
 	ss, err := m.UpsertStatements(headerVals(name), data, pk)
 	if err != nil {
@@ -380,7 +381,7 @@ func quoteIdent(name string) string {
 // the demos are also removed.
 func dropTables(t *testing.T, db *sql.DB, sc scenario) {
 	t.Helper()
-	model, err := service.PlanModel(sc.schemaDoc(t), sc.Table, sc.PK, sc.Headers)
+	model, err := normalized.Plan(sc.schemaDoc(t), sc.Table, sc.PK, sc.Headers)
 	if err != nil {
 		t.Fatalf("PlanModel in dropTables: %v", err)
 	}

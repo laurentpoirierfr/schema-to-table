@@ -1,13 +1,13 @@
-package service
+package schema
 
 import "testing"
 
 // Names within the 63-character limit are only sanitized, never truncated.
 func TestIdentNameShort(t *testing.T) {
-	got := identName("landing_order_packages")
+	got := IdentName("landing_order_packages")
 	want := "landing_order_packages"
 	if got != want {
-		t.Errorf("identName(%q) = %q, want %q", "landing_order_packages", got, want)
+		t.Errorf("IdentName(%q) = %q, want %q", "landing_order_packages", got, want)
 	}
 }
 
@@ -15,17 +15,17 @@ func TestIdentNameShort(t *testing.T) {
 // prefix plus a deterministic hash suffix.
 func TestIdentNameTruncatesTo63(t *testing.T) {
 	long := "landing_order_" + repeat("extremely_long_property_name_", 4)
-	got := identName(long)
+	got := IdentName(long)
 	if len(got) != pgIdentMaxLen {
 		t.Errorf("len = %d, want %d (%q)", len(got), pgIdentMaxLen, got)
 	}
 	// Deterministic: same input, same output across calls.
-	if again := identName(long); again != got {
+	if again := IdentName(long); again != got {
 		t.Errorf("not deterministic: %q vs %q", got, again)
 	}
 	// Distinct long names sharing a prefix must not collide.
 	other := "landing_order_" + repeat("extremely_long_property_name_", 4) + "_x"
-	if identName(other) == got {
+	if IdentName(other) == got {
 		t.Errorf("distinct long names collide: %q", got)
 	}
 	// Prefix remains readable.
@@ -35,34 +35,34 @@ func TestIdentNameTruncatesTo63(t *testing.T) {
 }
 
 func TestIdentNameSanitizesBeforeTruncating(t *testing.T) {
-	got := identName("Schema-With WEIRD chars")
+	got := IdentName("Schema-With WEIRD chars")
 	// Non [a-z0-9_] chars become underscores, everything lowercase.
 	if got != "schema_with_weird_chars" {
-		t.Errorf("identName = %q", got)
+		t.Errorf("IdentName = %q", got)
 	}
 }
 
 // A very long abbreviation of the previous case also stays within the limit.
 func TestIdentNameSanitizesLong(t *testing.T) {
-	got := identName("Schema-With WEIRD chars and à long name that exceeds the ninety six character limit greatly yes indeed")
+	got := IdentName("Schema-With WEIRD chars and à long name that exceeds the ninety six character limit greatly yes indeed")
 	if len(got) > pgIdentMaxLen {
 		t.Errorf("len = %d, want <= %d (%q)", len(got), pgIdentMaxLen, got)
 	}
 }
 
-// quoteIdent must apply the same truncation as identName, so DDL, DML and
+// QuoteIdent must apply the same truncation as identName, so DDL, DML and
 // the registry all reference identical identifiers.
 func TestQuoteIdentTruncates(t *testing.T) {
 	long := "v_landing_order_" + repeat("a_very_long_array_name_", 4)
-	q := quoteIdent(long)
+	q := QuoteIdent(long)
 	if len(q) != pgIdentMaxLen+2 { // +2 for the surrounding quotes
 		t.Errorf("quoted len = %d, want %d (%q)", len(q), pgIdentMaxLen+2, q)
 	}
 	if q[0] != '"' || q[len(q)-1] != '"' {
 		t.Errorf("missing quotes: %q", q)
 	}
-	if q[1:len(q)-1] != identName(long) {
-		t.Errorf("quoteIdent does not match identName: %q vs %q", q, identName(long))
+	if q[1:len(q)-1] != IdentName(long) {
+		t.Errorf("QuoteIdent does not match IdentName: %q vs %q", q, IdentName(long))
 	}
 }
 
@@ -72,11 +72,4 @@ func repeat(s string, n int) string {
 		out += s
 	}
 	return out
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

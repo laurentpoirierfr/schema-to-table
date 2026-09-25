@@ -1,4 +1,4 @@
-package service
+package landing
 
 import (
 	"os"
@@ -13,9 +13,9 @@ func testTable(t *testing.T) *Table {
 	if err != nil {
 		t.Fatalf("read schema: %v", err)
 	}
-	tbl, err := New(string(doc), "JSONB")
+	tbl, err := Parse(string(doc), "JSONB")
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("Parse: %v", err)
 	}
 	return tbl
 }
@@ -70,9 +70,9 @@ func TestCreateTableGolden(t *testing.T) {
 
 func TestCreateTableNoColumns(t *testing.T) {
 	// A schema without any walked property → error at plan stage.
-	tbl, err := New(`{"type":"object"}`, "TEXT")
+	tbl, err := Parse(`{"type":"object"}`, "TEXT")
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("Parse: %v", err)
 	}
 	if _, err := tbl.Columns(nil); err == nil {
 		t.Error("expected error for schema with no columns")

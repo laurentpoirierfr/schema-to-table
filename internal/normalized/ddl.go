@@ -1,8 +1,10 @@
-package service
+package normalized
 
 import (
 	"fmt"
 	"strings"
+
+	"github.com/laurentpoirierfr/schema-to-table/internal/schema"
 )
 
 // CreateStatements renders the DDL for every planned table, in execution
@@ -54,11 +56,11 @@ func rootChildView(m *Model, child *TableSpec) (string, error) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "CREATE VIEW %s AS\nSELECT\n", quoteIdent(m.viewName(child)))
+	fmt.Fprintf(&b, "CREATE VIEW %s AS\nSELECT\n", schema.QuoteIdent(m.viewName(child)))
 
 	used := map[string]bool{}
 	var rootCols []string
-	for _, k := range sortedKeys(m.headers) {
+	for _, k := range schema.SortedKeys(m.headers) {
 		rootCols = append(rootCols, "header_"+k)
 	}
 	for _, c := range m.Root.Columns {
@@ -68,7 +70,7 @@ func rootChildView(m *Model, child *TableSpec) (string, error) {
 	var lines []string
 	for _, name := range rootCols {
 		used[name] = true
-		lines = append(lines, fmt.Sprintf("    %s.%s", quoteIdent("o"), quoteIdent(name)))
+		lines = append(lines, fmt.Sprintf("    %s.%s", schema.QuoteIdent("o"), schema.QuoteIdent(name)))
 	}
 	for _, c := range child.Columns {
 		out := c.Name
@@ -76,7 +78,7 @@ func rootChildView(m *Model, child *TableSpec) (string, error) {
 			out = segment + "_" + out
 		}
 		used[out] = true
-		lines = append(lines, fmt.Sprintf("    %s.%s AS %s", quoteIdent("p"), quoteIdent(c.Name), quoteIdent(out)))
+		lines = append(lines, fmt.Sprintf("    %s.%s AS %s", schema.QuoteIdent("p"), schema.QuoteIdent(c.Name), schema.QuoteIdent(out)))
 	}
 	b.WriteString(strings.Join(lines, ",\n"))
 	b.WriteString("\n")
@@ -85,20 +87,20 @@ func rootChildView(m *Model, child *TableSpec) (string, error) {
 	var fkConds []string
 	for i, fc := range child.FkCols {
 		fkConds = append(fkConds, fmt.Sprintf("%s.%s = %s.%s",
-			quoteIdent("p"), quoteIdent(fc), quoteIdent("o"), quoteIdent(m.Root.KeyCols[i])))
+			schema.QuoteIdent("p"), schema.QuoteIdent(fc), schema.QuoteIdent("o"), schema.QuoteIdent(m.Root.KeyCols[i])))
 	}
 	fmt.Fprintf(&b, "FROM %s AS %s\nJOIN %s AS %s ON %s;\n",
-		quoteIdent(m.Root.Name), quoteIdent("o"),
-		quoteIdent(child.Name), quoteIdent("p"), strings.Join(fkConds, " AND "))
+		schema.QuoteIdent(m.Root.Name), schema.QuoteIdent("o"),
+		schema.QuoteIdent(child.Name), schema.QuoteIdent("p"), strings.Join(fkConds, " AND "))
 	return b.String(), nil
 }
 
 func createTableStmt(t *TableSpec, headers map[string]string, root *TableSpec) (string, error) {
-	var cols []Column
+	var cols []schema.Column
 	if t == root {
 		// Root: ingestion headers first (sorted), then planned columns.
-		for _, k := range sortedKeys(headers) {
-			cols = append(cols, Column{Name: "header_" + k, Type: headers[k]})
+		for _, k := range schema.SortedKeys(headers) {
+			cols = append(cols, schema.Column{Name: "header_" + k, Type: headers[k]})
 		}
 	}
 	cols = append(cols, t.Columns...)
@@ -108,42 +110,42 @@ func createTableStmt(t *TableSpec, headers map[string]string, root *TableSpec) (
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "CREATE TABLE %s (\n", quoteIdent(t.Name))
+	fmt.Fprintf(&b, "CREATE TABLE %s (\n", schema.QuoteIdent(t.Name))
 	for i, c := range cols {
 		sep := ","
 		if i == len(cols)-1 {
 			sep = ""
 		}
-		fmt.Fprintf(&b, "    %s %s%s\n", quoteIdent(c.Name), c.Type, sep)
+		fmt.Fprintf(&b, "    %s %s%s\n", schema.QuoteIdent(c.Name), c.Type, sep)
 	}
 	b.WriteString(");\n")
 
 	// Root PK inline (single column); children get a composite key.
 	if t.PK != "" {
 		fmt.Fprintf(&b, "ALTER TABLE %s ADD PRIMARY KEY (%s);\n",
-			quoteIdent(t.Name), quoteIdent(t.PK))
+			schema.QuoteIdent(t.Name), schema.QuoteIdent(t.PK))
 	} else {
 		keyList := make([]string, len(t.KeyCols))
 		for i, k := range t.KeyCols {
-			keyList[i] = quoteIdent(k)
+			keyList[i] = schema.QuoteIdent(k)
 		}
 		fmt.Fprintf(&b, "ALTER TABLE %s ADD PRIMARY KEY (%s);\n",
-			quoteIdent(t.Name), strings.Join(keyList, ", "))
+			schema.QuoteIdent(t.Name), strings.Join(keyList, ", "))
 	}
 
 	// FK to the parent's key.
 	if t.Parent != nil {
 		fkList := make([]string, len(t.FkCols))
 		for i, fc := range t.FkCols {
-			fkList[i] = quoteIdent(fc)
+			fkList[i] = schema.QuoteIdent(fc)
 		}
 		refList := make([]string, len(t.Parent.KeyCols))
 		for i, k := range t.Parent.KeyCols {
-			refList[i] = quoteIdent(k)
+			refList[i] = schema.QuoteIdent(k)
 		}
 		fmt.Fprintf(&b, "ALTER TABLE %s ADD FOREIGN KEY (%s) REFERENCES %s (%s);\n",
-			quoteIdent(t.Name), strings.Join(fkList, ", "),
-			quoteIdent(t.Parent.Name), strings.Join(refList, ", "))
+			schema.QuoteIdent(t.Name), strings.Join(fkList, ", "),
+			schema.QuoteIdent(t.Parent.Name), strings.Join(refList, ", "))
 	}
 	return b.String(), nil
 }

@@ -2,7 +2,7 @@
 
 Deux processeurs batch pour [Bento](https://warpstreamlabs.github.io/bento/) (plugins Go intégrés via le module `public/service`) qui stockent les documents JSON entrants dans des landing tables PostgreSQL générées à la volée depuis le JSON Schema annoncé par le message.
 
-Ils réutilisent le moteur du CLI (`internal/service.PlanModel`) : **mode normalisé uniquement** — tables typées par niveau de tableau + vues dénormalisées `v_<racine>_<chemin>` + registre `<racine>_registry`.
+Ils réutilisent le moteur du CLI (`internal/normalized.Plan`, primitives dans `internal/schema`) : **mode normalisé uniquement** — tables typées par niveau de tableau + vues dénormalisées `v_<racine>_<chemin>` + registre `<racine>_registry`.
 
 ## Enregistrement
 
@@ -39,7 +39,39 @@ pipeline:
         create_model: true
 ```
 
-Chaque message doit porter en **métadonnées** les valeurs `schema_url_header` et `table_name_header` (via les labels du input, `set_meta`, ou une mutation préalable). Les clés déclarées dans `headers` sont lues dans les métadonnées du message et stockées ; une clé absente est stockée à `""`.
+Chaque message doit porter en **métadonnées** les valeurs `schema_url_header` et `table_name_header` (via les labels du input, `set_meta`, ou une mutation préalable) — voir la section dédiée ci-dessous pour `headers`.
+
+### `headers` : métadonnées du message → colonnes typées
+
+Le bloc `headers` déclare, parmi les **métadonnées techniques** du message (les « headers » Bento, posés par l'input, `set_meta`, ou une mutation), celles que l'on veut **persister et typer** en base :
+
+```yaml
+headers:            # clé = nom de la métadonnée, valeur = type SQL
+  source: TEXT
+  trace_id: TEXT
+```
+
+1. **À la création du modèle**, chaque clé devient une colonne `header_<clé>` **sur la table racine uniquement**, avec le type SQL annoncé — les tables enfants et les vues dénormalisées ne la reçoivent pas :
+
+   ```sql
+   CREATE TABLE "landing_test" (
+       "header_source"   TEXT,
+       "header_trace_id" TEXT,
+       "id"              BIGINT, ...
+   )
+   ```
+
+2. **À l'écriture de chaque message**, la valeur est lue dans les métadonnées du message (`MetaGet("source")` → `"api"`, …) et insérée dans la colonne correspondante :
+   - métadonnée **présente** → sa valeur est stockée ;
+   - métadonnée **absente** → la colonne reçoit la chaîne vide `''` (jamais une erreur).
+
+3. **Seules les clés déclarées sont stockées** : `schema_url` et `table_name` sont consommées pour **router** le message (choix du schéma et de la table racine) mais ne deviennent pas des colonnes ; tout autre métadonnée non déclarée est ignorée.
+
+Nuances :
+
+- Les valeurs sont toujours émises comme **littéral de chaîne** (`'api'`, `'t-0001'`) — le type SQL annoncé sert à la **définition de la colonne** et PostgreSQL **caste à l'insertion**. Ex. : `trace_id: UUID` avec `t-0001` fonctionne ; préférez `TEXT` pour des valeurs libres.
+- Les types SQL sont ceux du moteur du CLI : `UUID`, `BIGINT`, `NUMERIC`, `BOOLEAN`, `TIMESTAMPTZ`, `TEXT`, …
+- Lecture en SQL : `SELECT "header_trace_id" FROM landing_test WHERE id = 1;` (vérifié par le test d'intégration).
 
 ## Comportement
 
@@ -60,7 +92,7 @@ flowchart LR
 
     P --> M{transaction batch}
     M --> L[loader de schémas<br/>cache HTTP par URL]
-    L --> PL[PlanModel<br/>internal/service]
+    L --> PL[normalized.Plan<br/>internal/normalized]
     M --> DDL{racine existante ?}
     DDL -- non --> D1[DDL tables typées]
     D1 --> D2[Vues dénormalisées v_racine_chemin]
@@ -88,7 +120,7 @@ go test ./pkg/processors                                   # unitaires (fake sin
 go test -tags integration ./pkg/processors -run TestProcessorsIntegration   # E2E contre compose
 ```
 
-- **Unitaires** : enregistrement, validation de config, tolérance `already exists`, création/désactivation du modèle, dml insert/upsert, colonnes `header_*`, batchs multi-tables, rollback intégral, schéma trop gros, métadonnées manquantes.
-- **Intégration** : contre la base de `compose.yaml` — création du modèle réel, passages INSERT puis UPSERT, présence des vues et du registre, relecture des valeurs `header_source`/`header_trace_id`.
+- **Unitaires** : enregistrement, validation de config, tolérance `already exists`, création/désactivation du modèle, dml insert/upsert, colonnes `header_*`, batchs multi-tables, rollback intégral, schéma trop gros, métadonnées manquantes, erreurs `begin`/`commit`/connectivité.
+- **Intégration** : contre la base de `compose.yaml` — création du modèle réel, passages INSERT puis UPSERT, présence des vues et du registre, relecture des valeurs `header_source`/`header_trace_id`, et **rollback intégral** : un batch en échec (double clé primaire) ne laisse ni ligne ni table derrière lui (le DDL du modèle roulback avec la transaction).
 
 (`S2T_DSN` permet de surcharger le DSN par défaut `postgres://s2t:s2t@localhost:5432/s2t?sslmode=disable`.)

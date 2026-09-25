@@ -1,31 +1,25 @@
-package service
+package landing
 
 import (
 	"fmt"
 	"strings"
-)
 
-// Column is one planned SQL column: Name is the final (sanitized)
-// identifier, Type the SQL type (or, once rendered, the literal is kept
-// separately by the value stage).
-type Column struct {
-	Name string
-	Type string
-}
+	"github.com/laurentpoirierfr/schema-to-table/internal/schema"
+)
 
 // Table is a parsed JSON Schema bound to a complex-type mapping,
 // ready to run every later stage (plan columns, render DDL/DML).
 type Table struct {
-	root        *jsonSchema
+	root        *schema.Node
 	complexType string
 }
 
-// New parses schemaDoc (JSON Schema draft 2020-12) and returns the
+// Parse parses schemaDoc (JSON Schema draft 2020-12) and returns the
 // pipeline entry point. complexType is the SQL type used for anything
 // that can't become a fixed column — arrays and untyped/generic objects
 // (e.g. "JSONB", "TEXT", "VARCHAR(8000)")…; "" defaults to "TEXT".
-func New(schemaDoc string, complexType string) (*Table, error) {
-	root, err := parseSchema(schemaDoc)
+func Parse(schemaDoc string, complexType string) (*Table, error) {
+	root, err := schema.Parse(schemaDoc)
 	if err != nil {
 		return nil, err
 	}
@@ -45,24 +39,24 @@ func New(schemaDoc string, complexType string) (*Table, error) {
 // payload itself (transport/metadata fields): each key becomes a column
 // named "header_<key>", using the map value verbatim as its SQL type.
 // Columns are returned in deterministic order (headers first, sorted).
-func (t *Table) Columns(headers map[string]string) ([]Column, error) {
-	var cols []Column
+func (t *Table) Columns(headers map[string]string) ([]schema.Column, error) {
+	var cols []schema.Column
 	seen := map[string]bool{}
 
 	addColumn := func(name, typ string) {
-		name = sanitizeIdent(name)
+		name = schema.SanitizeIdent(name)
 		if seen[name] {
 			return // already added, e.g. a field shared across oneOf variants
 		}
 		seen[name] = true
-		cols = append(cols, Column{Name: name, Type: typ})
+		cols = append(cols, schema.Column{Name: name, Type: typ})
 	}
 
-	for _, k := range sortedKeys(headers) {
+	for _, k := range schema.SortedKeys(headers) {
 		addColumn("header_"+k, headers[k])
 	}
 
-	if err := walkSchema("", t.root, t.root, t.complexType, addColumn, map[*jsonSchema]bool{}); err != nil {
+	if err := walkSchema("", t.root, t.root, t.complexType, addColumn, map[*schema.Node]bool{}); err != nil {
 		return nil, fmt.Errorf("plan columns: %w", err)
 	}
 	if len(cols) == 0 {
@@ -71,17 +65,17 @@ func (t *Table) Columns(headers map[string]string) ([]Column, error) {
 	return cols, nil
 }
 
-// walkSchema (stage 2) recursively flattens s, located at the given
+// walkSchema recursively flattens s, located at the given
 // underscore-joined prefix, into columns via addColumn.
 // visited is a per-path cycle guard: entries are added on the way down
 // and removed on the way back up, so the same $defs entry can
 // legitimately be reused at different paths.
-func walkSchema(prefix string, s, root *jsonSchema, complexType string, addColumn func(name, typ string), visited map[*jsonSchema]bool) error {
+func walkSchema(prefix string, s, root *schema.Node, complexType string, addColumn func(name, typ string), visited map[*schema.Node]bool) error {
 	if s == nil {
 		return nil
 	}
 
-	resolved, err := resolveRef(s, root)
+	resolved, err := schema.Resolve(s, root)
 	if err != nil {
 		return err
 	}
@@ -101,7 +95,7 @@ func walkSchema(prefix string, s, root *jsonSchema, complexType string, addColum
 	// oneOf/anyOf: polymorphism, root-level included. A landing table has
 	// one row shape, so we take the union of every variant's columns;
 	// addColumn already dedupes fields variants share.
-	for _, sub := range append(append([]*jsonSchema{}, resolved.OneOf...), resolved.AnyOf...) {
+	for _, sub := range append(append([]*schema.Node{}, resolved.OneOf...), resolved.AnyOf...) {
 		if err := walkSchema(prefix, sub, root, complexType, addColumn, visited); err != nil {
 			return err
 		}
@@ -111,21 +105,21 @@ func walkSchema(prefix string, s, root *jsonSchema, complexType string, addColum
 		return nil
 	}
 
-	for _, key := range sortedKeys(resolved.Properties) {
+	for _, key := range schema.SortedKeys(resolved.Properties) {
 		prop := resolved.Properties[key]
-		segment := toSnake(key)
+		segment := schema.ToSnake(key)
 		childPrefix := segment
 		if prefix != "" {
 			childPrefix = prefix + "_" + segment
 		}
 
-		propResolved, err := resolveRef(prop, root)
+		propResolved, err := schema.Resolve(prop, root)
 		if err != nil {
 			return err
 		}
 
 		switch {
-		case propResolved.Items != nil || primaryType(propResolved) == "array":
+		case propResolved.Items != nil || schema.PrimaryType(propResolved) == "array":
 			// A nested collection can't become fixed columns; it lands
 			// as complexType for downstream reshaping (or a child table).
 			addColumn(childPrefix, complexType)
@@ -135,7 +129,7 @@ func walkSchema(prefix string, s, root *jsonSchema, complexType string, addColum
 				return err
 			}
 		default:
-			addColumn(childPrefix, sqlType(propResolved, complexType))
+			addColumn(childPrefix, schema.SQLType(propResolved, complexType))
 		}
 	}
 

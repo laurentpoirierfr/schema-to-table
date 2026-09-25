@@ -1,4 +1,4 @@
-package service
+package normalized
 
 import (
 	"os"
@@ -60,12 +60,12 @@ const modelSchema = `{
 
 func planFixture(t *testing.T) *Model {
 	t.Helper()
-	m, err := PlanModel(modelSchema, "landing_order", "id", map[string]string{
+	m, err := Plan(modelSchema, "landing_order", "id", map[string]string{
 		"source":      "TEXT",
 		"ingested_at": "TIMESTAMPTZ",
 	})
 	if err != nil {
-		t.Fatalf("PlanModel: %v", err)
+		t.Fatalf("Plan: %v", err)
 	}
 	return m
 }
@@ -164,7 +164,7 @@ func TestModelViewStatementsDenormalized(t *testing.T) {
 // The registry documents every table and view with its logical name, final
 // SQL name, JSON path and description (from the schema title).
 func TestModelRegistryStatements(t *testing.T) {
-	m, err := PlanModel(`{
+	m, err := Plan(`{
 		"title": "Commande",
 		"type": "object",
 		"required": ["id"],
@@ -178,7 +178,7 @@ func TestModelRegistryStatements(t *testing.T) {
 		}
 	}`, "landing_order", "id", nil)
 	if err != nil {
-		t.Fatalf("PlanModel: %v", err)
+		t.Fatalf("Plan: %v", err)
 	}
 	regs, err := m.RegistryStatements()
 	if err != nil {
@@ -346,9 +346,9 @@ func TestModelPlanScalarArrayChild(t *testing.T) {
 	     "tags":{"type":"array","items":{"type":"string"}}}}},
 	  "$ref": "#/$defs/ob"
 	}`
-	m, err := PlanModel(schema, "tbl", "a", nil)
+	m, err := Plan(schema, "tbl", "a", nil)
 	if err != nil {
-		t.Fatalf("PlanModel: %v", err)
+		t.Fatalf("Plan: %v", err)
 	}
 	if len(m.Tables) != 2 {
 		t.Fatalf("expected 2 tables, got %d", len(m.Tables))
@@ -366,9 +366,9 @@ func TestModelPlanScalarArrayInsert(t *testing.T) {
 	schema := `{"type":"object","properties":{
 	   "id":{"type":"string"},
 	   "tags":{"type":"array","items":{"type":"string"}}}}`
-	m, err := PlanModel(schema, "tbl", "id", nil)
+	m, err := Plan(schema, "tbl", "id", nil)
 	if err != nil {
-		t.Fatalf("PlanModel: %v", err)
+		t.Fatalf("Plan: %v", err)
 	}
 	stmts, err := m.InsertStatements(nil, `{"id":"A1","tags":["x","y"]}`)
 	if err != nil {
@@ -389,7 +389,7 @@ func TestModelPlanScalarArrayInsert(t *testing.T) {
 func TestModelPlanUntypableObjectErrors(t *testing.T) {
 	schema := `{"type":"object","properties":{"id":{"type":"string"},
 	   "meta":{"type":"object"}}}`
-	_, err := PlanModel(schema, "tbl", "id", nil)
+	_, err := Plan(schema, "tbl", "id", nil)
 	if err == nil {
 		t.Fatal("expected plan error for untyped object")
 	}
@@ -401,7 +401,7 @@ func TestModelPlanUntypableObjectErrors(t *testing.T) {
 func TestModelPlanUntypableArrayErrors(t *testing.T) {
 	schema := `{"type":"object","properties":{"id":{"type":"string"},
 	   "items":{"type":"array"}}}`
-	_, err := PlanModel(schema, "tbl", "id", nil)
+	_, err := Plan(schema, "tbl", "id", nil)
 	if err == nil {
 		t.Fatal("expected plan error for array without items")
 	}
@@ -420,12 +420,12 @@ func TestModelEndToEndDataDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema: %v", err)
 	}
-	m, err := PlanModel(string(schemaDoc), "landing_order", "id", map[string]string{
+	m, err := Plan(string(schemaDoc), "landing_order", "id", map[string]string{
 		"source":      "TEXT",
 		"ingested_at": "TIMESTAMPTZ",
 	})
 	if err != nil {
-		t.Fatalf("PlanModel: %v", err)
+		t.Fatalf("Plan: %v", err)
 	}
 
 	files, err := os.ReadDir(filepath.Join("..", "..", "schemas", "order", "datas"))

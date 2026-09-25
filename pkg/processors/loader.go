@@ -15,7 +15,7 @@ const maxSchemaBytes = 1 << 20 // 1 MiB
 
 // schemaLoader fetches JSON Schema documents over HTTP and caches them by
 // URL, so a schema shared across a stream is network-fetched (and later
-// re-parsed by service.New) only once.
+// re-parsed by the normalized planner) only once.
 type schemaLoader struct {
 	client *http.Client
 	mu     sync.Mutex
