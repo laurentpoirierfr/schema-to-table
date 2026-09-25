@@ -24,6 +24,7 @@ Une fois l'import présent, les processeurs `schema_to_table_insert` et `schema_
 | `pk` | `id` | colonne(s) de clé de la table racine — cible `ON CONFLICT` de l'upsert |
 | `headers` | `{}` | colonnes d'ingestion : `source: TEXT`, `trace_id: TEXT` → deviennent `header_source`, `header_trace_id` |
 | `create_model` | `true` | crée tables + vues + registre si la table racine n'existe pas |
+| `schema_ttl` | `1h` | durée de vie du cache des schémas par URL ; `0` désactive le cache (fetch à chaque message) |
 
 ```yaml
 pipeline:
@@ -37,6 +38,7 @@ pipeline:
           source: TEXT
           trace_id: TEXT
         create_model: true
+        schema_ttl: 1h
 ```
 
 Chaque message doit porter en **métadonnées** les valeurs `schema_url_header` et `table_name_header` (via les labels du input, `set_meta`, ou une mutation préalable) — voir la section dédiée ci-dessous pour `headers`.
@@ -79,7 +81,7 @@ Nuances :
 - **Création à la volée** : pour chaque table racine distincte du batch, la présence de la table est vérifiée une fois ; si absente, l'ensemble du modèle est créé — table(s) du schéma, **vues dénormalisées** `v_<racine>_<chemin>` et **registre** `<racine>_registry`. Les erreurs « already exists » (concurrence entre workers) sont tolérées.
 - **Upsert** : `ON CONFLICT (<pk>)` sur la table racine + remplacement de la scène complète des enregistrements enfants (les tableaux sans clé naturelle sont remplacés).
 - **Types typés** : `uuid` → `UUID`, `integer` → `BIGINT`, `number` → `NUMERIC`, `boolean` → `BOOLEAN`, `date-time` → `TIMESTAMPTZ`, chaînes → `TEXT`, identifiants longs tronqués à 63 caractères (prefixe + hash).
-- **Cache du schéma** : le processeur met en cache par URL le JSON Schema téléchargé (timeout HTTP 30 s, taille max 1 Mio, accès sécurisé par mutex).
+- **Cache du schéma** : le processeur met en cache par URL le JSON Schema téléchargé (timeout HTTP 30 s, taille max 1 Mio, accès sécurisé par mutex). La durée de vie est pilotée par `schema_ttl` : tant qu'une entrée n'a pas expiré, le document est servi depuis le cache ; à expiration (`1h` par défaut) il est re-téléchargé. `schema_ttl: 0` désactive le cache.
 
 ## Architecture
 

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func atomicAdd(p *int32, v int32) { atomic.AddInt32(p, v) }
@@ -22,7 +23,7 @@ func TestLoaderCache(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	l := newSchemaLoader()
+	l := newSchemaLoader(time.Hour)
 	ctx := context.Background()
 	doc1, err := l.Load(ctx, srv.URL)
 	if err != nil {
@@ -107,7 +108,7 @@ func TestLoaderErrors(t *testing.T) {
 		{"connection refused", closedURL, "schema"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			l := newSchemaLoader()
+			l := newSchemaLoader(time.Hour)
 			_, err := l.Load(context.Background(), tt.url)
 			if err == nil {
 				t.Fatal("expected an error, got nil")
@@ -130,7 +131,7 @@ func TestLoaderConcurrent(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	l := newSchemaLoader()
+	l := newSchemaLoader(time.Hour)
 	const n = 32
 	var wg sync.WaitGroup
 	errs := make(chan error, n)
@@ -152,5 +153,79 @@ func TestLoaderConcurrent(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+// TestLoaderTTLRefreshes advances the injected clock past the TTL: the
+// cached document expires and the schema is fetched again.
+func TestLoaderTTLRefreshes(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomicAdd(&hits, 1)
+		_, _ = w.Write([]byte("{\"type\": \"object\"}"))
+	}))
+	t.Cleanup(srv.Close)
+
+	ttl := 10 * time.Minute
+	now := time.Now()
+	l := newSchemaLoader(ttl)
+	l.now = func() time.Time { return now }
+
+	ctx := context.Background()
+	doc1, err := l.Load(ctx, srv.URL)
+	if err != nil {
+		t.Fatalf("first Load: %v", err)
+	}
+	if _, err := l.Load(ctx, srv.URL); err != nil {
+		t.Fatalf("second Load: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("schema fetched %d times within TTL, want 1", hits)
+	}
+
+	// Advance past the TTL: the next Load must re-fetch.
+	now = now.Add(ttl + time.Second)
+	doc2, err := l.Load(ctx, srv.URL)
+	if err != nil {
+		t.Fatalf("Load after expiry: %v", err)
+	}
+	if doc2 != doc1 {
+		t.Errorf("re-fetched document differs: %q vs %q", doc2, doc1)
+	}
+	if hits != 2 {
+		t.Errorf("schema fetched %d times after expiry, want 2", hits)
+	}
+
+	// Within the new TTL window the cache serves the document again.
+	if _, err := l.Load(ctx, srv.URL); err != nil {
+		t.Fatalf("Load back within TTL: %v", err)
+	}
+	if hits != 2 {
+		t.Errorf("schema fetched %d times back within TTL, want 2", hits)
+	}
+}
+
+// TestLoaderTTLDisabled with ttl <= 0 never caches: every Load fetches.
+func TestLoaderTTLDisabled(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomicAdd(&hits, 1)
+		_, _ = w.Write([]byte("{\"type\": \"object\"}"))
+	}))
+	t.Cleanup(srv.Close)
+
+	l := newSchemaLoader(0)
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		doc, err := l.Load(ctx, srv.URL)
+		if err != nil {
+			t.Fatalf("Load %d: %v", i, err)
+		}
+		if doc != `{"type": "object"}` {
+			t.Errorf("doc %d = %q", i, doc)
+		}
+	}
+	if hits != 2 {
+		t.Errorf("schema fetched %d times with cache disabled, want 2", hits)
 	}
 }

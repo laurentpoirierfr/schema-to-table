@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/warpstreamlabs/bento/v4/public/service"
@@ -786,7 +787,7 @@ func TestSinkPingFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseConfig: %v", err)
 	}
-	bp := &batchProcessor{cfg: cfg, loader: newSchemaLoader()}
+	bp := &batchProcessor{cfg: cfg, loader: newSchemaLoader(time.Hour)}
 	t.Cleanup(func() { _ = bp.Close(context.Background()) })
 
 	batch := service.MessageBatch{message(`{"id":1}`, nil)}
@@ -799,7 +800,7 @@ func TestSinkPingFailure(t *testing.T) {
 }
 
 func TestCloseWhenNotOpened(t *testing.T) {
-	bp := &batchProcessor{cfg: &processorConfig{dsn: "postgres://u:p@localhost/db"}, loader: newSchemaLoader()}
+	bp := &batchProcessor{cfg: &processorConfig{dsn: "postgres://u:p@localhost/db"}, loader: newSchemaLoader(time.Hour)}
 	if err := bp.Close(context.Background()); err != nil {
 		t.Fatalf("Close on a never-opened processor must return nil, got: %v", err)
 	}
@@ -920,6 +921,7 @@ func TestParseConfigMissingFields(t *testing.T) {
 		"pk":                service.NewStringField,
 		"headers":           service.NewStringMapField,
 		"create_model":      service.NewBoolField,
+		"schema_ttl":        service.NewDurationField,
 	}
 	// ParseYAML is fed a spec without the target field: the accessor inside
 	// parseConfig then fails with "field ... was not present".
@@ -928,11 +930,12 @@ func TestParseConfigMissingFields(t *testing.T) {
 		absent string
 		kept   []string
 	}{
-		{"no schema_url_header", "schema_url_header", []string{"table_name_header", "pk"}},
-		{"no table_name_header", "table_name_header", []string{"schema_url_header", "pk"}},
-		{"no pk", "pk", []string{"schema_url_header", "table_name_header"}},
-		{"no headers", "headers", []string{"schema_url_header", "table_name_header", "pk"}},
-		{"no create_model", "create_model", []string{"schema_url_header", "table_name_header", "pk", "headers"}},
+		{"no schema_url_header", "schema_url_header", []string{"table_name_header", "pk", "create_model", "schema_ttl"}},
+		{"no table_name_header", "table_name_header", []string{"schema_url_header", "pk", "create_model", "schema_ttl"}},
+		{"no pk", "pk", []string{"schema_url_header", "table_name_header", "create_model", "schema_ttl"}},
+		{"no headers", "headers", []string{"schema_url_header", "table_name_header", "pk", "create_model", "schema_ttl"}},
+		{"no create_model", "create_model", []string{"schema_url_header", "table_name_header", "pk", "headers", "schema_ttl"}},
+		{"no schema_ttl", "schema_ttl", []string{"schema_url_header", "table_name_header", "pk", "headers", "create_model"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -940,9 +943,12 @@ func TestParseConfigMissingFields(t *testing.T) {
 			yaml := "dsn: x\n"
 			for _, k := range tt.kept {
 				fields = append(fields, ctor[k](k))
-				if k == "headers" {
+				switch k {
+				case "headers":
 					yaml += "headers: {}\n"
-				} else {
+				case "schema_ttl":
+					yaml += "schema_ttl: 1h\n"
+				default:
 					yaml += k + ": y\n"
 				}
 			}

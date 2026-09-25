@@ -8,5 +8,5 @@ func newUpsertProcessor(conf *service.ParsedConfig, _ *service.Resources) (servi
 	if err != nil {
 		return nil, err
 	}
-	return &batchProcessor{cfg: cfg, upsert: true, loader: newSchemaLoader()}, nil
+	return &batchProcessor{cfg: cfg, upsert: true, loader: newSchemaLoader(cfg.schemaTTL)}, nil
 }

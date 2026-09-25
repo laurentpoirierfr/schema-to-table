@@ -8,5 +8,5 @@ func newInsertProcessor(conf *service.ParsedConfig, _ *service.Resources) (servi
 	if err != nil {
 		return nil, err
 	}
-	return &batchProcessor{cfg: cfg, loader: newSchemaLoader()}, nil
+	return &batchProcessor{cfg: cfg, loader: newSchemaLoader(cfg.schemaTTL)}, nil
 }

@@ -22,6 +22,7 @@ package processors
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/warpstreamlabs/bento/v4/public/service"
 )
@@ -40,6 +41,7 @@ type processorConfig struct {
 	pk              string            // root primary key (upsert conflict column)
 	headers         map[string]string // header key → SQL type (root ingestion columns)
 	createModel     bool              // create tables + views + registry when missing
+	schemaTTL       time.Duration     // schema cache lifetime per URL (<=0 disables)
 }
 
 // baseFields returns the ConfigFields shared by both processors.
@@ -62,6 +64,9 @@ func baseFields() []*service.ConfigField {
 		service.NewBoolField("create_model").
 			Default(true).
 			Description("Whether to create the normalized model when the root table does not exist yet: every typed table, the denormalized `v_<root>_<child>` views and the `<root>_registry` schema registry."),
+		service.NewDurationField("schema_ttl").
+			Default("1h").
+			Description("How long a fetched JSON Schema document is cached per URL before it is fetched again (e.g. `1h`, `30m`). Use `0` to disable the cache and fetch the schema on every message."),
 	}
 }
 
@@ -101,6 +106,7 @@ func insertSpec() *service.ConfigSpec {
         headers:
           source: TEXT
         create_model: true
+        schema_ttl: 1h
 `)
 }
 
@@ -126,6 +132,7 @@ value, including its child rows (arrays are replaced wholesale).
         pk: id
         headers:
           source: TEXT
+        schema_ttl: 1h
 `)
 }
 
@@ -152,6 +159,9 @@ func parseConfig(conf *service.ParsedConfig) (*processorConfig, error) {
 		return nil, err
 	}
 	if cfg.createModel, err = conf.FieldBool("create_model"); err != nil {
+		return nil, err
+	}
+	if cfg.schemaTTL, err = conf.FieldDuration("schema_ttl"); err != nil {
 		return nil, err
 	}
 
