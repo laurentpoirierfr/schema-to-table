@@ -9,5 +9,6 @@ Dockerfile
 Makefile
 README.md
 PROCESSORS.md
+BENTO.md
 compose.yaml
 opencode.sh

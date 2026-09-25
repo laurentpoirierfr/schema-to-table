@@ -86,6 +86,7 @@ Nuances :
 - **Upsert** : `ON CONFLICT (<pk>)` sur la table racine + remplacement de la scène complète des enregistrements enfants (les tableaux sans clé naturelle sont remplacés).
 - **Types typés** : `uuid` → `UUID`, `integer` → `BIGINT`, `number` → `NUMERIC`, `boolean` → `BOOLEAN`, `date-time` → `TIMESTAMPTZ`, chaînes → `TEXT`, identifiants longs tronqués à 63 caractères (prefixe + hash).
 - **Cache du schéma** : le processeur met en cache par URL le JSON Schema téléchargé (timeout HTTP 30 s, taille max 1 Mio, accès sécurisé par mutex). La durée de vie est pilotée par `schema_ttl` : tant qu'une entrée n'a pas expiré, le document est servi depuis le cache ; à expiration (`1h` par défaut) il est re-téléchargé. `schema_ttl: 0` désactive la cache. Les entrées **expirées sont purgées** par un balayage paresseux (au plus une fois par `schema_ttl`) : les URLs vues une seule fois ne s'accumulent pas.
+- **Casse des métadonnées** : `schema_url_header`, `table_name_header` et les clés de `headers` sont lues **insensiblement à la casse** (une correspondance exacte gagne toujours). Utile en HTTP où Go canonicalise les headers (`schema_url` arrive en métadonnée `Schema_Url`), et tolérant aux cas Kafka (`SCHEMA_URL`, `Table_Name`…).
 - **Observabilité** : chaque processeur expose des métriques (`<processeur>_batches_processed`, `_batches_failed`, `_messages_processed`, `_messages_permanent_errors`, `_schema_fetches`, `_schema_cache_hits`) et logge le contexte (table, schema_url) des rejets permanents.
 
 ## Dead-letter queue (`on_error: per_message`)
@@ -110,30 +111,9 @@ output:
 
 ## Distribution : `cmd/bento` + Docker
 
-Les plugins Bento étant du **Go compilé**, la distribution est un binaire custom embarqué dans une image Docker :
+Depuis que les plugins Bento sont du **Go compilé**, la distribution est un **binaire custom** embarqué dans une image Docker : binaire `cmd/bento`, `Dockerfile`, config d'exemple `bento/config.yaml`, quick start et notes de production sont documentés dans **[BENTO.md](BENTO.md)**.
 
-```sh
-docker build -t schema-to-table-bento .          # go build ./cmd/bento (CGO_ENABLED=0)
-make demo-bento                                  # = compose up : postgres + serveur de schémas + Bento
-```
-
-- `cmd/bento/main.go` : `import _ "pkg/processors"` + `_ "public/components/{pure,io,kafka,prometheus}"` puis `service.RunCLI` — CLI Bento complet (`-c`, `lint`, `test`, `create`…). Le bundle `public/components/all` est évité : il tire des arbres expérimentaux (`parquet-go`, avro…) qui ne lient plus sous Go 1.25 (linkname `runtime.aeskeysched` supprimé).
-- `bento/config.yaml` : exemple fonctionnel — input `http_server` (les headers HTTP deviennent les métadonnées), processeur `schema_to_table_insert`, output `drop` (les lignes sont déjà écrites dans la transaction du processeur). L'API Bento est sur un port distinct (4196) de l'input (4195).
-- `compose.yaml` : le service `schema-server` (python `http.server`) sert le dépôt `schemas/`, `bento` pointe `POSTGRES_DSN` vers le conteneur `postgres`.
-
-Démo bout en bout :
-
-```sh
-curl -X POST http://localhost:4195/ingest \
-  -H "schema_url: http://schema-server:8080/schemas/employee/schema.json" \
-  -H "table_name: landing_employee" \
-  -H "source: curl-demo" \
-  -d '{"id":"7a0e8400-e29b-41d4-a716-446655440101","kind":"standard","name":"Claire Dubois","department":"Engineering","hourlyRate":42.5,"tags":["golang"]}'
-```
-
-puis `http://localhost:4196/metrics` porte les compteurs `schema_to_table_insert_*`.
-
-> **Casse des métadonnées** : la lecture est insensible à la casse. Utile en HTTP où Go canonicalise les headers (`schema_url` arrive en métadonnée `Schema_Url`), et tolérant aux cas Kafka (`SCHEMA_URL`, `Table_Name`…). Une correspondance exacte gagne toujours.
+Raccourci : `make demo-bento` (compose complet) puis le curl de démo — voir [BENTO.md](BENTO.md#quick-start-compose--curl).
 
 ## Architecture
 
