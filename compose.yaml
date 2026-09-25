@@ -16,6 +16,36 @@ services:
       timeout: 3s
       retries: 15
 
+  # Sert les JSON Schema du dépôt pour le processeur : chaque POST annonce
+  # schema_url=http://schema-server:8080/schemas/<sujet>/schema.json.
+  schema-server:
+    image: python:3-alpine
+    container_name: schema-to-table-schemas
+    command: python -m http.server 8080 --directory /site
+    volumes:
+      - ./:/site:ro
+    ports:
+      - "8080:8080"
+
+  # Bento custom : le CLI Bento complet avec schema_to_table_insert/_upsert.
+  # Démo : `curl -X POST ...` (voir bento/config.yaml).
+  bento:
+    build: .
+    container_name: schema-to-table-bento
+    command: ["-c", "/config/bento.yaml"]
+    environment:
+      POSTGRES_DSN: postgres://s2t:s2t@postgres:5432/s2t?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+      schema-server:
+        condition: service_started
+    ports:
+      - "4195:4195" # input http_server (/ingest)
+      - "4196:4196" # API Bento (/ping, /metrics)
+    volumes:
+      - ./bento/config.yaml:/config/bento.yaml:ro
+
 volumes:
   pgdata:
     name: schema-to-table_pgdata

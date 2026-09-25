@@ -108,6 +108,33 @@ output:
           resource: postgres_out
 ```
 
+## Distribution : `cmd/bento` + Docker
+
+Les plugins Bento étant du **Go compilé**, la distribution est un binaire custom embarqué dans une image Docker :
+
+```sh
+docker build -t schema-to-table-bento .          # go build ./cmd/bento (CGO_ENABLED=0)
+make demo-bento                                  # = compose up : postgres + serveur de schémas + Bento
+```
+
+- `cmd/bento/main.go` : `import _ "pkg/processors"` + `_ "public/components/{pure,io,kafka,prometheus}"` puis `service.RunCLI` — CLI Bento complet (`-c`, `lint`, `test`, `create`…). Le bundle `public/components/all` est évité : il tire des arbres expérimentaux (`parquet-go`, avro…) qui ne lient plus sous Go 1.25 (linkname `runtime.aeskeysched` supprimé).
+- `bento/config.yaml` : exemple fonctionnel — input `http_server` (les headers HTTP deviennent les métadonnées), processeur `schema_to_table_insert`, output `drop` (les lignes sont déjà écrites dans la transaction du processeur). L'API Bento est sur un port distinct (4196) de l'input (4195).
+- `compose.yaml` : le service `schema-server` (python `http.server`) sert le dépôt `schemas/`, `bento` pointe `POSTGRES_DSN` vers le conteneur `postgres`.
+
+Démo bout en bout :
+
+```sh
+curl -X POST http://localhost:4195/ingest \
+  -H "schema_url: http://schema-server:8080/schemas/employee/schema.json" \
+  -H "table_name: landing_employee" \
+  -H "source: curl-demo" \
+  -d '{"id":"7a0e8400-e29b-41d4-a716-446655440101","kind":"standard","name":"Claire Dubois","department":"Engineering","hourlyRate":42.5,"tags":["golang"]}'
+```
+
+puis `http://localhost:4196/metrics` porte les compteurs `schema_to_table_insert_*`.
+
+> **Casse des métadonnées** : la lecture est insensible à la casse. Utile en HTTP où Go canonicalise les headers (`schema_url` arrive en métadonnée `Schema_Url`), et tolérant aux cas Kafka (`SCHEMA_URL`, `Table_Name`…). Une correspondance exacte gagne toujours.
+
 ## Architecture
 
 ```mermaid

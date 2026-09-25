@@ -1,0 +1,13 @@
+.git
+.github
+.gitignore
+assets
+schemas
+tests
+bento/config.yaml
+Dockerfile
+Makefile
+README.md
+PROCESSORS.md
+compose.yaml
+opencode.sh

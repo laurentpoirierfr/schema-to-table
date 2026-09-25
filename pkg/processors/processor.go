@@ -58,8 +58,28 @@ func (p *batchProcessor) wire(name string, mgr *service.Resources) {
 
 // meta returns the message metadata value for key, empty when absent.
 func (p *batchProcessor) meta(msg *service.Message, key string) string {
-	v, _ := msg.MetaGet(key)
+	v, _ := metaGetFold(msg, key)
 	return v
+}
+
+// metaGetFold reads a metadata value with case-insensitive key matching, an
+// exact match always winning. Metadata casing is not canonical across
+// producers: Go canonicalizes HTTP headers to "Schema_Url", a Kafka message
+// may carry "schema_url" or "SCHEMA_URL". Tolerating any spelling keeps the
+// schema_url_header / table_name_header / headers contract stable.
+func metaGetFold(msg *service.Message, key string) (string, bool) {
+	if v, ok := msg.MetaGet(key); ok {
+		return v, true
+	}
+	var value string
+	var found bool
+	_ = msg.MetaWalk(func(k, v string) error {
+		if strings.EqualFold(k, key) {
+			value, found = v, true
+		}
+		return nil
+	})
+	return value, found
 }
 
 // ProcessBatch stores every message of batch inside one transaction.
@@ -114,13 +134,13 @@ func (p *batchProcessor) ProcessBatch(ctx context.Context, batch service.Message
 // storeMessage plans the landing model and executes the INSERT/UPSERT batch
 // for one message.
 func (p *batchProcessor) storeMessage(ctx context.Context, tr tx, msg *service.Message, ensured map[string]bool) error {
-	tableName, ok := msg.MetaGet(p.cfg.tableNameHeader)
+	tableName, ok := metaGetFold(msg, p.cfg.tableNameHeader)
 	tableName = strings.TrimSpace(tableName)
 	if !ok || tableName == "" {
 		return permanent(fmt.Errorf("metadata header %q (table name) is required", p.cfg.tableNameHeader))
 	}
 
-	schemaURL, ok := msg.MetaGet(p.cfg.schemaURLHeader)
+	schemaURL, ok := metaGetFold(msg, p.cfg.schemaURLHeader)
 	schemaURL = strings.TrimSpace(schemaURL)
 	if !ok || schemaURL == "" {
 		return permanent(fmt.Errorf("metadata header %q (schema URL) is required", p.cfg.schemaURLHeader))
@@ -140,7 +160,7 @@ func (p *batchProcessor) storeMessage(ctx context.Context, tr tx, msg *service.M
 	// header key, read from the message metadata (absent → empty).
 	headerValues := make(map[string]string, len(p.cfg.headers))
 	for k := range p.cfg.headers {
-		headerValues[k], _ = msg.MetaGet(k)
+		headerValues[k], _ = metaGetFold(msg, k)
 	}
 
 	if err := p.ensureModel(ctx, tr, tableName, model, ensured); err != nil {

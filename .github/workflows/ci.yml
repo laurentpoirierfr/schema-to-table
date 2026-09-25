@@ -58,3 +58,18 @@ jobs:
 
       - name: Integration tests
         run: go test -race -tags integration ./pkg/processors ./tests
+
+  bento-image:
+    name: build the Bento image and lint its example config
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t schema-to-table-bento .
+
+      - name: Smoke: Bento CLI + config lint inside the image
+        run: |
+          docker run --rm -v "$PWD/bento/config.yaml:/config/bento.yaml:ro" \
+            schema-to-table-bento -c /config/bento.yaml lint

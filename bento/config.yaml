@@ -1,0 +1,57 @@
+# schema-to-table : exemple de pipeline Bento.
+#
+# Le processeur schema_to_table_insert hydrâte la table racine (et le modèle
+# normalisé : tables typées par niveau de tableau, vues v_<racine>_<chemin>,
+# registre <racine>_registry) depuis le JSON Schema annoncé dans la
+# métadonnée "schema_url". La table cible et les colonnes d'ingestion sont
+# portées par les métadonnées du message.
+#
+# Avec l'input http_server, les headers HTTP du POST deviennent les
+# métadonnées du message — le curl de démo pose donc directement
+# schema_url / table_name / source :
+#
+#   curl -X POST http://localhost:4195/ingest \
+#     -H "Content-Type: application/json" \
+#     -H "schema_url: http://schema-server:8080/schemas/employee/schema.json" \
+#     -H "table_name: landing_employee" \
+#     -H "source: curl-demo" \
+#     -d '{"id":"7a0e8400-e29b-41d4-a716-446655440101","kind":"standard","name":"Claire Dubois","department":"Engineering","hourlyRate":42.5,"tags":["golang"]}'
+#
+# Hors compose, pointer schema_url vers http://localhost:8080/schemas/... et
+# paramétrer POSTGRES_DSN.
+
+input:
+  http_server:
+    address: 0.0.0.0:4195
+    path: /ingest
+    allowed_verbs: [POST]
+
+# L'API de supervision Bento (métriques, /ping, /metrics…) sur un autre port.
+http:
+  address: 0.0.0.0:4196
+
+# Expose /metrics (Prometheus) sur l'API de supervision — consulter
+# http://localhost:4196/metrics pour les compteurs <proc>_* du processeur.
+metrics:
+  prometheus: {}
+
+pipeline:
+  processors:
+    - schema_to_table_insert:
+        # Surchargeable : compose pose POSTGRES_DSN=...@postgres:5432/s2t.
+        dsn: ${POSTGRES_DSN:postgres://s2t:s2t@localhost:5432/s2t?sslmode=disable}
+        schema_url_header: schema_url
+        table_name_header: table_name
+        pk: id
+        headers:
+          source: TEXT
+        create_model: true
+        schema_ttl: 1h
+        # Les messages définitivement invalides sont rejetés individuellement
+        # (ils restent marqués, ex. pour une dead-letter avec switch errored()).
+        on_error: per_message
+
+# Le processeur a déjà écrit les lignes dans sa propre transaction : on
+# acquitte ici. Laissez drop: {} et n'imaginez pas un output SQL.
+output:
+  drop: {}

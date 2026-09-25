@@ -727,6 +727,43 @@ func TestOnErrorPerMessageWired(t *testing.T) {
 	}
 }
 
+func TestMetaGetFold(t *testing.T) {
+	msg := service.NewMessage([]byte("{}"))
+	msg.MetaSet("Schema_Url", "http://x/schema.json")
+	msg.MetaSet("table_name", "landing_t")
+	msg.MetaSet("SOURCE", "kafka")
+
+	for key, want := range map[string]string{
+		// the configured spelling must match the actual (canonicalized) one.
+		"schema_url": "http://x/schema.json",
+		"SCHEMA_URL": "http://x/schema.json",
+		"table_name": "landing_t",
+		"TABLE_NAME": "landing_t",
+		"source":     "kafka",
+		"Source":     "kafka",
+	} {
+		got, ok := metaGetFold(msg, key)
+		if !ok || got != want {
+			t.Errorf("metaGetFold(%q) = %q,%v ; want %q,true", key, got, ok, want)
+		}
+	}
+
+	if got, ok := metaGetFold(msg, "absent"); ok || got != "" {
+		t.Errorf("metaGetFold(absent) = %q,%v ; want empty,false", got, ok)
+	}
+
+	// an exact match always wins over a case-fold match.
+	msg.MetaSet("schema_url", "exact")
+	if got, ok := metaGetFold(msg, "Schema_Url"); !ok {
+		t.Error("metaGetFold(Schema_Url) lost, ok=false")
+	} else if got != "http://x/schema.json" {
+		t.Errorf("exact match should win: got %q", got)
+	}
+	if got, _ := metaGetFold(msg, "schema_url"); got != "exact" {
+		t.Errorf("exact match should win: got %q", got)
+	}
+}
+
 func TestExecFailureRollsBackBatch(t *testing.T) {
 	srv, _ := schemaServer(t, testSchema)
 	sink := newFakeSink()

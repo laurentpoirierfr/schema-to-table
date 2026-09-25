@@ -40,13 +40,13 @@ go build ./...
 
 ```sh
 # Mode plat (JSONB)
-go run ./cmd -schema schemas/order/schema.json -data schemas/order/datas \
+go run ./cmd/proto -schema schemas/order/schema.json -data schemas/order/datas \
     -table landing_order -mode all \
     -headers source=TEXT,ingested_at=TIMESTAMPTZ \
     -header-values source=proto,ingested_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # Mode normalisé : tables toutes typées + vues + registre
-go run ./cmd -schema schemas/order/schema.json -data schemas/order/datas \
+go run ./cmd/proto -schema schemas/order/schema.json -data schemas/order/datas \
     -table landing_order -mode all -model -pk id \
     -headers source=TEXT,ingested_at=TIMESTAMPTZ \
     -header-values source=proto,ingested_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -55,7 +55,7 @@ go run ./cmd -schema schemas/order/schema.json -data schemas/order/datas \
 ### Exécution contre PostgreSQL
 
 ```sh
-go run ./cmd -schema schemas/order/schema.json -data schemas/order/datas \
+go run ./cmd/proto -schema schemas/order/schema.json -data schemas/order/datas \
     -table landing_order -mode all -model -pk id -drop \
     -dsn postgres://s2t:s2t@localhost:5432/s2t?sslmode=disable \
     -headers source=TEXT,ingested_at=TIMESTAMPTZ \
@@ -136,6 +136,9 @@ make test-integration  # tests E2E
 make run               # CLI, SQL sur stdout
 make demo              # mode plat contre la base
 make demo-model        # mode normalisé + vues contre la base
+make image             # construire l'image Bento custom (processeurs compilés)
+make demo-bento        # compose complet : postgres + schémas + Bento (curl démo, voir PROCESSORS.md)
+make bento-lint        # lint de bento/config.yaml par le binaire Bento custom
 make build|vet|fmt
 ```
 
@@ -143,7 +146,7 @@ make build|vet|fmt
 
 ```mermaid
 flowchart LR
-    subgraph Tool["L'outil (cmd/main.go + internal/cli, landing, normalized)"]
+    subgraph Tool["L'outil (cmd/proto/main.go + internal/cli, landing, normalized)"]
         schema[JSON Schema 2020-12] --> parse[Parsing + types SQL]
         data[documents JSON] --> plan[Plan du modèle]
         parse --> plan
@@ -154,10 +157,18 @@ flowchart LR
     out --> pg[(PostgreSQL)]
 ```
 
-Les processeurs Bento (`pkg/processors`) sont décrits dans **[PROCESSORS.md](PROCESSORS.md)** avec leur propre schéma.
+Les processeurs Bento (`pkg/processors`) sont décrits dans **[PROCESSORS.md](PROCESSORS.md)** avec leur propre schéma. La **distribution Bento** (`cmd/bento`, image Docker, config d'exemple et compose) y est documentée — démo :
+
+```sh
+make demo-bento
+curl -X POST http://localhost:4195/ingest -H "schema_url: http://schema-server:8080/schemas/employee/schema.json" \
+  -H "table_name: landing_employee" -H "source: curl-demo" \
+  -d '{"id":"7a0e8400-e29b-41d4-a716-446655440101","kind":"standard","name":"Claire Dubois","department":"Engineering","hourlyRate":42.5}'
+```
 
 ```
-cmd/main.go      CLI (flags uniquement, délègue tout à internal/cli)
+cmd/proto/main.go      CLI (flags uniquement, délègue tout à internal/cli)
+cmd/bento/main.go      distribution Bento : CLI Bento complet + processeurs compilés
 internal/
 ├── schema/      parsing JSON Schema, types SQL, identifiants + limite 63 chars, littéraux SQL
 ├── landing/     mode plat : plan de colonnes + CREATE / INSERT / UPSERT (une table + complexType)
