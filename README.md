@@ -1,5 +1,7 @@
 # Schema → Table
 
+![Schema](./assets/schema.png)
+
 Générateur de landing tables PostgreSQL à partir d'un [JSON Schema](https://json-schema.org/draft/2020-12/schema) polymorphe et de documents JSON. Le besoin d'origine : remplacer les colonnes `JSONB` génériques par des colonnes **typées** et navigables par SQL, sans réseau ni orchestration — le CLI produit du SQL que vous exécutez où vous voulez, ou l'exécute directement contre une base.
 
 Deux stratégies de stockage sont supportées, au choix :
