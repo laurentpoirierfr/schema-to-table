@@ -59,6 +59,10 @@ func TestLoaderErrors(t *testing.T) {
 	srv500 := fail(http.StatusInternalServerError, "")
 	t.Cleanup(srv500.Close)
 
+	// HTTP 404: a permanently missing schema.
+	srv404 := fail(http.StatusNotFound, "")
+	t.Cleanup(srv404.Close)
+
 	// Content-Length announced above the cap without a matching body: the
 	// loader must reject it from the header alone.
 	srvBig := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -95,17 +99,19 @@ func TestLoaderErrors(t *testing.T) {
 	_ = ln.Close()
 
 	for _, tt := range []struct {
-		name string
-		url  string
-		want string
+		name      string
+		url       string
+		want      string
+		permanent bool
 	}{
-		{"bad url", "http://[::1", "schema"},
-		{"http status", srv500.URL, "HTTP 500"},
-		{"content length", srvBig.URL, "too large"},
-		{"blank document", srvBlank.URL, "empty document"},
-		{"streamed too large", srvStream.URL, "too large"},
-		{"truncated body", srvTrunc.URL, "schema"},
-		{"connection refused", closedURL, "schema"},
+		{"bad url", "http://[::1", "schema", false},
+		{"http status", srv500.URL, "HTTP 500", false},
+		{"http 404 schema", srv404.URL, "HTTP 404", true},
+		{"content length", srvBig.URL, "too large", true},
+		{"blank document", srvBlank.URL, "empty document", true},
+		{"streamed too large", srvStream.URL, "too large", true},
+		{"truncated body", srvTrunc.URL, "schema", false},
+		{"connection refused", closedURL, "schema", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			l := newSchemaLoader(time.Hour)
@@ -115,6 +121,9 @@ func TestLoaderErrors(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error %q does not mention %q", err, tt.want)
+			}
+			if isPermanent(err) != tt.permanent {
+				t.Errorf("isPermanent(%v) = %v, want %v", err, isPermanent(err), tt.permanent)
 			}
 		})
 	}
@@ -227,5 +236,51 @@ func TestLoaderTTLDisabled(t *testing.T) {
 	}
 	if hits != 2 {
 		t.Errorf("schema fetched %d times with cache disabled, want 2", hits)
+	}
+}
+
+// TestLoaderSweepRemovesExpired advances the injected clock: expired entries
+// are purged on the lazy sweep, unvisited URLs do not accumulate.
+func TestLoaderSweepRemovesExpired(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("{\"type\": \"object\"}"))
+	}))
+	t.Cleanup(srv.Close)
+
+	ttl := time.Minute
+	now := time.Now()
+	l := newSchemaLoader(ttl)
+	l.now = func() time.Time { return now }
+
+	ctx := context.Background()
+	if _, err := l.Load(ctx, srv.URL+"/a"); err != nil {
+		t.Fatalf("load a: %v", err)
+	}
+	now = now.Add(30 * time.Second)
+	if _, err := l.Load(ctx, srv.URL+"/b"); err != nil {
+		t.Fatalf("load b: %v", err)
+	}
+
+	l.mu.Lock()
+	if got := len(l.cache); got != 2 {
+		l.mu.Unlock()
+		t.Fatalf("cache has %d entries before sweep, want 2", got)
+	}
+	l.mu.Unlock()
+
+	// Advance well past both expiries and trigger a sweep by loading a third
+	// URL: the sweep drops a and b.
+	now = now.Add(2 * time.Minute)
+	if _, err := l.Load(ctx, srv.URL+"/c"); err != nil {
+		t.Fatalf("load c: %v", err)
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if got := len(l.cache); got != 1 {
+		t.Fatalf("cache has %d entries after sweep, want 1 (c only)", got)
+	}
+	if _, ok := l.cache[srv.URL+"/c"]; !ok {
+		t.Errorf("entry c missing after sweep")
 	}
 }

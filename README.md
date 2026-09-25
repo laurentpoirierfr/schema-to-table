@@ -121,8 +121,9 @@ make test               # tests unitaires (sans base)
 make test-integration   # E2E contre la base (compose doit tourner)
 ```
 
-- Unitaires : `internal/schema`, `internal/landing` et `internal/normalized` (`*_test.go` : colonnes, valeurs, modèle, vues, registre, troncature des noms).
-- Intégration (`tests/`, build tag `integration`) : data-driven sur `schemas/*/`, invariants génériques (nb de lignes racine = nb de datas, tables enfants = somme des longueurs de tableaux, vues = nb de lignes enfants, registre = tables + vues).
+- Unitaires : `internal/schema`, `internal/landing`, `internal/normalized` et `pkg/processors` (`*_test.go` : colonnes, valeurs, modèle, vues, registre, troncature des noms, processeurs Bento).
+- Intégration (`tests/` et `pkg/processors`, build tag `integration`) : data-driven sur `schemas/*/`, invariants génériques (nb de lignes racine = nb de datas, tables enfants = somme des longueurs de tableaux, vues = nb de lignes enfants, registre = tables + vues), E2E des processeurs contre PostgreSQL.
+- **CI** (`.github/workflows/ci.yml`) : sur chaque push vers `main` et pull request — `gofmt` + `go vet` + tests unitaires, puis tests d'intégration sur un service PostgreSQL 17 de GitHub Actions.
 
 ## Make targets
 

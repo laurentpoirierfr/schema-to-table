@@ -22,21 +22,60 @@ type batchProcessor struct {
 	loader *schemaLoader
 	sink   sink // nil until the first batch opens the DSN connection
 
+	logger *service.Logger
+	name   string // processor component name, metric/log prefix
+
+	// counters, all nil-safe.
+	batchesProcessed  *service.MetricCounter
+	batchesFailed     *service.MetricCounter
+	messagesProcessed *service.MetricCounter
+	permanentErrors   *service.MetricCounter
+
 	mu     sync.Mutex
 	opened bool
+}
+
+// wire binds the processor to Bento resources: metrics counters (including
+// the loader's schema counters) and a contextual logger. A nil Resources
+// leaves the fields nil — the counters are nil-safe and the logger no-ops.
+func (p *batchProcessor) wire(name string, mgr *service.Resources) {
+	p.name = name
+	if mgr == nil {
+		return
+	}
+	prefix := name + "_"
+	counter := func(s string) *service.MetricCounter {
+		return mgr.Metrics().NewCounter(prefix + s)
+	}
+	p.logger = mgr.Logger()
+	p.batchesProcessed = counter("batches_processed")
+	p.batchesFailed = counter("batches_failed")
+	p.messagesProcessed = counter("messages_processed")
+	p.permanentErrors = counter("messages_permanent_errors")
+	p.loader.cacheHits = counter("schema_cache_hits")
+	p.loader.fetches = counter("schema_fetches")
+}
+
+// meta returns the message metadata value for key, empty when absent.
+func (p *batchProcessor) meta(msg *service.Message, key string) string {
+	v, _ := msg.MetaGet(key)
+	return v
 }
 
 // ProcessBatch stores every message of batch inside one transaction.
 // A missing header, an unreachable schema or a statement failure aborts the
 // whole transaction and returns an error, so Bento marks the batch as
-// failed without leaving partial rows behind.
+// failed without leaving partial rows behind. Under cfg "per_message" mode,
+// permanent failures reject only the offending message.
 func (p *batchProcessor) ProcessBatch(ctx context.Context, batch service.MessageBatch) ([]service.MessageBatch, error) {
 	if err := p.ensureSink(ctx); err != nil {
+		p.batchesFailed.Incr(1)
 		return nil, fmt.Errorf("connect: %w", err)
 	}
 
 	tr, err := p.sink.Begin(ctx)
 	if err != nil {
+		p.batchesFailed.Incr(1)
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
 	committed := false
@@ -49,14 +88,26 @@ func (p *batchProcessor) ProcessBatch(ctx context.Context, batch service.Message
 	ensured := map[string]bool{}
 	for _, msg := range batch {
 		if err := p.storeMessage(ctx, tr, msg, ensured); err != nil {
+			if p.cfg.onError == onErrorPerMessage && isPermanent(err) {
+				msg.SetError(err)
+				p.permanentErrors.Incr(1)
+				p.logger.With("table", p.meta(msg, p.cfg.tableNameHeader),
+					"schema_url", p.meta(msg, p.cfg.schemaURLHeader)).
+					Errorf("permanent error, message rejected: %v", err)
+				continue
+			}
+			p.batchesFailed.Incr(1)
 			return nil, fmt.Errorf("store message: %w", err)
 		}
 	}
 
 	if err := tr.Commit(); err != nil {
+		p.batchesFailed.Incr(1)
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 	committed = true
+	p.batchesProcessed.Incr(1)
+	p.messagesProcessed.Incr(int64(len(batch)))
 	return []service.MessageBatch{batch}, nil
 }
 
@@ -66,13 +117,13 @@ func (p *batchProcessor) storeMessage(ctx context.Context, tr tx, msg *service.M
 	tableName, ok := msg.MetaGet(p.cfg.tableNameHeader)
 	tableName = strings.TrimSpace(tableName)
 	if !ok || tableName == "" {
-		return fmt.Errorf("metadata header %q (table name) is required", p.cfg.tableNameHeader)
+		return permanent(fmt.Errorf("metadata header %q (table name) is required", p.cfg.tableNameHeader))
 	}
 
 	schemaURL, ok := msg.MetaGet(p.cfg.schemaURLHeader)
 	schemaURL = strings.TrimSpace(schemaURL)
 	if !ok || schemaURL == "" {
-		return fmt.Errorf("metadata header %q (schema URL) is required", p.cfg.schemaURLHeader)
+		return permanent(fmt.Errorf("metadata header %q (schema URL) is required", p.cfg.schemaURLHeader))
 	}
 
 	schemaDoc, err := p.loader.Load(ctx, schemaURL)
@@ -82,7 +133,7 @@ func (p *batchProcessor) storeMessage(ctx context.Context, tr tx, msg *service.M
 
 	model, err := normalized.Plan(schemaDoc, tableName, p.cfg.pk, p.cfg.headers)
 	if err != nil {
-		return fmt.Errorf("plan model from schema %s: %w", schemaURL, err)
+		return permanent(fmt.Errorf("plan model from schema %s: %w", schemaURL, err))
 	}
 
 	// headerValues feeds the ingestion columns: one value per configured
@@ -108,7 +159,7 @@ func (p *batchProcessor) storeMessage(ctx context.Context, tr tx, msg *service.M
 		stmts, err = model.InsertStatements(headerValues, string(data))
 	}
 	if err != nil {
-		return fmt.Errorf("render statements for %s: %w", tableName, err)
+		return permanent(fmt.Errorf("render statements for %s: %w", tableName, err))
 	}
 
 	for i, stmt := range stmts {

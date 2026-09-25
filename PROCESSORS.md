@@ -25,6 +25,7 @@ Une fois l'import présent, les processeurs `schema_to_table_insert` et `schema_
 | `headers` | `{}` | colonnes d'ingestion : `source: TEXT`, `trace_id: TEXT` → deviennent `header_source`, `header_trace_id` |
 | `create_model` | `true` | crée tables + vues + registre si la table racine n'existe pas |
 | `schema_ttl` | `1h` | durée de vie du cache des schémas par URL ; `0` désactive le cache (fetch à chaque message) |
+| `on_error` | `abort` | `abort` : échec d'un message → rollback du batch entier ; `per_message` : les défauts permanents rejettent le message fautif seul (voir plus bas) |
 
 ```yaml
 pipeline:
@@ -39,6 +40,7 @@ pipeline:
           trace_id: TEXT
         create_model: true
         schema_ttl: 1h
+        on_error: abort
 ```
 
 Chaque message doit porter en **métadonnées** les valeurs `schema_url_header` et `table_name_header` (via les labels du input, `set_meta`, ou une mutation préalable) — voir la section dédiée ci-dessous pour `headers`.
@@ -78,10 +80,33 @@ Nuances :
 ## Comportement
 
 - **Transactionnel** : un batch = une transaction, `BEGIN` → création éventuelle du modèle → `INSERT`/`UPSERT` par message → `COMMIT`. La moindre erreur (schéma injoignable, payload invalide, PK absente, échec SQL) → `ROLLBACK` : **aucune écriture partielle**, la ligne fautive est repassée en erreur avec `message.SetError`.
+- **`on_error: abort` (défaut)** : tout échec d'un message *permet* le rollback du batch entier et le processeur renvoie l'erreur — tous les messages du batch sont marqués en échec par Bento.
+- **`on_error: per_message`** : les messages valides sont conservés et la transaction est **committée** ; seule une **panne permanente** (métadonnée manquante, schéma 4xx/suspect, payload qui ne colle pas au modèle, PK absente) rejette le message fautif (`message.SetError`) — l'infrastructure, elle, fait toujours échouer le batch (connectivité, HTTP 5xx, erreurs SQL). Les erreurs SQL telles que les violations de contrainte font toujours échouer le batch : la transaction PostgreSQL est alors dans l'état "aborted" et ne peut plus être poursuivie.
 - **Création à la volée** : pour chaque table racine distincte du batch, la présence de la table est vérifiée une fois ; si absente, l'ensemble du modèle est créé — table(s) du schéma, **vues dénormalisées** `v_<racine>_<chemin>` et **registre** `<racine>_registry`. Les erreurs « already exists » (concurrence entre workers) sont tolérées.
 - **Upsert** : `ON CONFLICT (<pk>)` sur la table racine + remplacement de la scène complète des enregistrements enfants (les tableaux sans clé naturelle sont remplacés).
 - **Types typés** : `uuid` → `UUID`, `integer` → `BIGINT`, `number` → `NUMERIC`, `boolean` → `BOOLEAN`, `date-time` → `TIMESTAMPTZ`, chaînes → `TEXT`, identifiants longs tronqués à 63 caractères (prefixe + hash).
-- **Cache du schéma** : le processeur met en cache par URL le JSON Schema téléchargé (timeout HTTP 30 s, taille max 1 Mio, accès sécurisé par mutex). La durée de vie est pilotée par `schema_ttl` : tant qu'une entrée n'a pas expiré, le document est servi depuis le cache ; à expiration (`1h` par défaut) il est re-téléchargé. `schema_ttl: 0` désactive le cache.
+- **Cache du schéma** : le processeur met en cache par URL le JSON Schema téléchargé (timeout HTTP 30 s, taille max 1 Mio, accès sécurisé par mutex). La durée de vie est pilotée par `schema_ttl` : tant qu'une entrée n'a pas expiré, le document est servi depuis le cache ; à expiration (`1h` par défaut) il est re-téléchargé. `schema_ttl: 0` désactive la cache. Les entrées **expirées sont purgées** par un balayage paresseux (au plus une fois par `schema_ttl`) : les URLs vues une seule fois ne s'accumulent pas.
+- **Observabilité** : chaque processeur expose des métriques (`<processeur>_batches_processed`, `_batches_failed`, `_messages_processed`, `_messages_permanent_errors`, `_schema_fetches`, `_schema_cache_hits`) et logge le contexte (table, schema_url) des rejets permanents.
+
+## Dead-letter queue (`on_error: per_message`)
+
+En hydratant un input *redeliverable* (Kafka, AMQP…), un message toujours en échec se refait re-traiter sans fin. Cassez la boucle en rejetant le message fautif et en le routant vers une dead-letter : le processeur pose `message.SetError` sur le message seul, et la sortie `switch` sur `errored()` renvoie ce message vers une file d'échec :
+
+```yaml
+output:
+  switch:
+    retry_until_success: true
+    cases:
+      - check: errored()
+        output:
+          kafka:
+            addresses: [kafka:9092]
+            topic: dead-letter
+            key: "${! meta(\"table_name\") }"
+            errors:
+      - output:
+          resource: postgres_out
+```
 
 ## Architecture
 
@@ -122,7 +147,7 @@ go test ./pkg/processors                                   # unitaires (fake sin
 go test -tags integration ./pkg/processors -run TestProcessorsIntegration   # E2E contre compose
 ```
 
-- **Unitaires** : enregistrement, validation de config, tolérance `already exists`, création/désactivation du modèle, dml insert/upsert, colonnes `header_*`, batchs multi-tables, rollback intégral, schéma trop gros, métadonnées manquantes, erreurs `begin`/`commit`/connectivité.
+- **Unitaires** : enregistrement, validation de config, tolérance `already exists`, création/désactivation du modèle, dml insert/upsert, colonnes `header_*`, batchs multi-tables, rollback intégral, `on_error` (rejet message vs abort batch, panne infra), schéma trop gros, purges du cache, métadonnées manquantes, erreurs `begin`/`commit`/connectivité.
 - **Intégration** : contre la base de `compose.yaml` — création du modèle réel, passages INSERT puis UPSERT, présence des vues et du registre, relecture des valeurs `header_source`/`header_trace_id`, et **rollback intégral** : un batch en échec (double clé primaire) ne laisse ni ligne ni table derrière lui (le DDL du modèle roulback avec la transaction).
 
 (`S2T_DSN` permet de surcharger le DSN par défaut `postgres://s2t:s2t@localhost:5432/s2t?sslmode=disable`.)

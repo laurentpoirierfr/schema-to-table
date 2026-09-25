@@ -21,6 +21,7 @@ package processors
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -31,6 +32,9 @@ import (
 const (
 	insertProcessorName = "schema_to_table_insert"
 	upsertProcessorName = "schema_to_table_upsert"
+
+	onErrorAbort      = "abort"
+	onErrorPerMessage = "per_message"
 )
 
 // processorConfig is the validated configuration of either processor.
@@ -42,6 +46,7 @@ type processorConfig struct {
 	headers         map[string]string // header key → SQL type (root ingestion columns)
 	createModel     bool              // create tables + views + registry when missing
 	schemaTTL       time.Duration     // schema cache lifetime per URL (<=0 disables)
+	onError         string            // abort | per_message
 }
 
 // baseFields returns the ConfigFields shared by both processors.
@@ -67,6 +72,9 @@ func baseFields() []*service.ConfigField {
 		service.NewDurationField("schema_ttl").
 			Default("1h").
 			Description("How long a fetched JSON Schema document is cached per URL before it is fetched again (e.g. `1h`, `30m`). Use `0` to disable the cache and fetch the schema on every message."),
+		service.NewStringField("on_error").
+			Default(onErrorAbort).
+			Description("How a failed message is handled. `abort` (default) rolls the whole batch back and marks every message as failed: the batch is all-or-nothing. `per_message` keeps the transaction for messages that validate: a permanent failure (missing metadata header, unreachable or invalid schema document, or a payload that does not fit the model) rejects only the offending message with `message.SetError`, so a `switch`/`fallback` output routing `errored()` messages can dead-letter it. Infrastructure failures (connectivity, HTTP 5xx, transaction or SQL errors) always abort the batch."),
 	}
 }
 
@@ -107,6 +115,7 @@ func insertSpec() *service.ConfigSpec {
           source: TEXT
         create_model: true
         schema_ttl: 1h
+        on_error: abort
 `)
 }
 
@@ -133,6 +142,7 @@ value, including its child rows (arrays are replaced wholesale).
         headers:
           source: TEXT
         schema_ttl: 1h
+        on_error: abort
 `)
 }
 
@@ -163,6 +173,12 @@ func parseConfig(conf *service.ParsedConfig) (*processorConfig, error) {
 	}
 	if cfg.schemaTTL, err = conf.FieldDuration("schema_ttl"); err != nil {
 		return nil, err
+	}
+	if cfg.onError, err = conf.FieldString("on_error"); err != nil {
+		return nil, err
+	}
+	if cfg.onError != onErrorAbort && cfg.onError != onErrorPerMessage {
+		return nil, fmt.Errorf("on_error must be %q or %q, got %q", onErrorAbort, onErrorPerMessage, cfg.onError)
 	}
 
 	if strings.TrimSpace(cfg.dsn) == "" {

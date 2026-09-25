@@ -554,6 +554,179 @@ func TestMissingPkInPayload(t *testing.T) {
 	}
 }
 
+func onErrorBatch(srvURL string) service.MessageBatch {
+	return service.MessageBatch{
+		message(`{"id":1,"name":"alpha","tags":["a"]}`, map[string]string{
+			"table_name": "landing_test", "schema_url": srvURL, "source": "api",
+		}),
+		message(`{"name":"bad-no-pk"}`, map[string]string{
+			"table_name": "landing_test", "schema_url": srvURL, "source": "api",
+		}),
+		message(`{"id":3,"name":"gamma","tags":[]}`, map[string]string{
+			"table_name": "landing_test", "schema_url": srvURL, "source": "batch",
+		}),
+	}
+}
+
+// TestOnErrorPerMessageKeepsValidMessages: with on_error: per_message the
+// permanently-failing message is rejected individually — its error is set and
+// it contributes no DML — while the valid messages are committed.
+func TestOnErrorPerMessageKeepsValidMessages(t *testing.T) {
+	srv, _ := schemaServer(t, testSchema)
+	sink := newFakeSink()
+	proc := newTestProcessor(t, false, baseYAML()+"on_error: per_message\n", sink)
+
+	batch := onErrorBatch(srv.URL)
+	out, err := proc.ProcessBatch(context.Background(), batch)
+	if err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if len(out) != 1 || len(out[0]) != 3 {
+		t.Fatalf("expected the 3 messages through, got %d", len(out))
+	}
+	if out[0][0].GetError() != nil || out[0][2].GetError() != nil {
+		t.Errorf("valid messages must be marked clean, got errors %v / %v", out[0][0].GetError(), out[0][2].GetError())
+	}
+	if out[0][1].GetError() == nil {
+		t.Error("the message missing its pk must carry a permanent error")
+	}
+
+	if sink.commits != 1 || sink.rollbacks != 0 {
+		t.Errorf("expected a single commit, no rollback: commits=%d rollbacks=%d", sink.commits, sink.rollbacks)
+	}
+
+	want := expectedModelExecs(t, testSchema, "landing_test", "id", false, []testMsg{
+		{payload: `{"id":1,"name":"alpha","tags":["a"]}`, headers: map[string]string{"source": "api"}},
+		{payload: `{"id":3,"name":"gamma","tags":[]}`, headers: map[string]string{"source": "batch"}},
+	})
+	assertExecs(t, sink, want)
+}
+
+// TestOnErrorDefaultAbort: the default aborts the whole batch on any failure:
+// nothing after the failing message is stored and the transaction rolls back.
+func TestOnErrorDefaultAbort(t *testing.T) {
+	srv, _ := schemaServer(t, testSchema)
+	sink := newFakeSink()
+	proc := newTestProcessor(t, false, baseYAML(), sink)
+
+	if _, err := proc.ProcessBatch(context.Background(), onErrorBatch(srv.URL)); err == nil {
+		t.Fatal("expected a batch error, got nil")
+	}
+	if sink.commits != 0 || sink.rollbacks != 1 {
+		t.Errorf("expected full rollback: commits=%d rollbacks=%d", sink.commits, sink.rollbacks)
+	}
+}
+
+// TestOnErrorPerMessageRecoverableStillAborts: even in per_message mode an
+// infrastructure failure (here an HTTP 500 answering the schema URL) aborts
+// the batch instead of rejecting a single message.
+func TestOnErrorPerMessageRecoverableStillAborts(t *testing.T) {
+	boom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(boom.Close)
+
+	sink := newFakeSink()
+	proc := newTestProcessor(t, false, baseYAML()+"on_error: per_message\n", sink)
+
+	batch := service.MessageBatch{
+		message(`{"id":1,"name":"alpha"}`, map[string]string{
+			"table_name": "landing_test", "schema_url": boom.URL,
+		}),
+	}
+	if _, err := proc.ProcessBatch(context.Background(), batch); err == nil {
+		t.Fatal("expected a batch error for the HTTP 500, got nil")
+	}
+	if sink.commits != 0 || sink.rollbacks != 1 {
+		t.Errorf("expected full rollback: commits=%d rollbacks=%d", sink.commits, sink.rollbacks)
+	}
+}
+
+func TestOnErrorValueValidated(t *testing.T) {
+	pConf, err := insertSpec().ParseYAML("dsn: postgres://h/db\non_error: bogus", nil)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if _, err := newInsertProcessor(pConf, nil); err == nil {
+		t.Fatal("expected an on_error validation error, got nil")
+	}
+}
+
+// TestWireResources: a Bento Resources wires the logger, the metric counters
+// (including the schema loader's) into the processor.
+func TestWireResources(t *testing.T) {
+	yaml := "dsn: postgres://user:pass@localhost:5432/db?sslmode=disable"
+	for _, name := range []string{insertProcessorName, upsertProcessorName} {
+		t.Run(name, func(t *testing.T) {
+			spec := insertSpec()
+			if name == upsertProcessorName {
+				spec = upsertSpec()
+			}
+			pConf, err := spec.ParseYAML(yaml, nil)
+			if err != nil {
+				t.Fatalf("parse yaml: %v", err)
+			}
+			var (
+				proc service.BatchProcessor
+				err2 error
+			)
+			if name == upsertProcessorName {
+				proc, err2 = newUpsertProcessor(pConf, service.MockResources())
+			} else {
+				proc, err2 = newInsertProcessor(pConf, service.MockResources())
+			}
+			if err2 != nil {
+				t.Fatalf("constructor: %v", err2)
+			}
+			bp := proc.(*batchProcessor)
+			if bp.logger == nil {
+				t.Error("logger must be wired from Resources")
+			}
+			if bp.loader == nil || bp.loader.cacheHits == nil || bp.loader.fetches == nil {
+				t.Error("loader and its schema counters must be wired")
+			}
+			for name, c := range map[string]*service.MetricCounter{
+				"batches_processed": bp.batchesProcessed, "batches_failed": bp.batchesFailed,
+				"messages_processed": bp.messagesProcessed, "permanent_errors": bp.permanentErrors,
+			} {
+				if c == nil {
+					t.Errorf("counter %s must be wired", name)
+				}
+			}
+		})
+	}
+}
+
+// TestOnErrorPerMessageWired: with Bento resources wired, a rejected
+// permanent failure logs and increments the counter while keeping the
+// transaction for the valid messages.
+func TestOnErrorPerMessageWired(t *testing.T) {
+	srv, _ := schemaServer(t, testSchema)
+	batch := service.MessageBatch{
+		message(`{"name":"bad-no-pk"}`, map[string]string{"table_name": "landing_test", "schema_url": srv.URL}),
+	}
+
+	pConf, err := insertSpec().ParseYAML(baseYAML()+"on_error: per_message\n", nil)
+	if err != nil {
+		t.Fatalf("parse yaml: %v", err)
+	}
+	proc, err := newInsertProcessor(pConf, service.MockResources())
+	if err != nil {
+		t.Fatalf("constructor: %v", err)
+	}
+	bp := proc.(*batchProcessor)
+	bp.sink = newFakeSink()
+	bp.opened = true
+
+	out, err := bp.ProcessBatch(context.Background(), batch)
+	if err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if len(out) != 1 || out[0][0].GetError() == nil {
+		t.Fatalf("expected the rejected message to carry its permanent error")
+	}
+}
+
 func TestExecFailureRollsBackBatch(t *testing.T) {
 	srv, _ := schemaServer(t, testSchema)
 	sink := newFakeSink()
@@ -922,6 +1095,7 @@ func TestParseConfigMissingFields(t *testing.T) {
 		"headers":           service.NewStringMapField,
 		"create_model":      service.NewBoolField,
 		"schema_ttl":        service.NewDurationField,
+		"on_error":          service.NewStringField,
 	}
 	// ParseYAML is fed a spec without the target field: the accessor inside
 	// parseConfig then fails with "field ... was not present".
@@ -930,12 +1104,13 @@ func TestParseConfigMissingFields(t *testing.T) {
 		absent string
 		kept   []string
 	}{
-		{"no schema_url_header", "schema_url_header", []string{"table_name_header", "pk", "create_model", "schema_ttl"}},
-		{"no table_name_header", "table_name_header", []string{"schema_url_header", "pk", "create_model", "schema_ttl"}},
-		{"no pk", "pk", []string{"schema_url_header", "table_name_header", "create_model", "schema_ttl"}},
-		{"no headers", "headers", []string{"schema_url_header", "table_name_header", "pk", "create_model", "schema_ttl"}},
-		{"no create_model", "create_model", []string{"schema_url_header", "table_name_header", "pk", "headers", "schema_ttl"}},
-		{"no schema_ttl", "schema_ttl", []string{"schema_url_header", "table_name_header", "pk", "headers", "create_model"}},
+		{"no schema_url_header", "schema_url_header", []string{"table_name_header", "pk", "create_model", "schema_ttl", "on_error"}},
+		{"no table_name_header", "table_name_header", []string{"schema_url_header", "pk", "create_model", "schema_ttl", "on_error"}},
+		{"no pk", "pk", []string{"schema_url_header", "table_name_header", "create_model", "schema_ttl", "on_error"}},
+		{"no headers", "headers", []string{"schema_url_header", "table_name_header", "pk", "create_model", "schema_ttl", "on_error"}},
+		{"no create_model", "create_model", []string{"schema_url_header", "table_name_header", "pk", "headers", "schema_ttl", "on_error"}},
+		{"no schema_ttl", "schema_ttl", []string{"schema_url_header", "table_name_header", "pk", "headers", "create_model", "on_error"}},
+		{"no on_error", "on_error", []string{"schema_url_header", "table_name_header", "pk", "headers", "create_model", "schema_ttl"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -948,6 +1123,8 @@ func TestParseConfigMissingFields(t *testing.T) {
 					yaml += "headers: {}\n"
 				case "schema_ttl":
 					yaml += "schema_ttl: 1h\n"
+				case "on_error":
+					yaml += "on_error: abort\n"
 				default:
 					yaml += k + ": y\n"
 				}
