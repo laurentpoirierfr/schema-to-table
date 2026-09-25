@@ -137,7 +137,7 @@ make run               # CLI, SQL sur stdout
 make demo              # mode plat contre la base
 make demo-model        # mode normalisé + vues contre la base
 make image             # construire l'image Bento custom (processeurs compilés)
-make demo-bento        # compose complet : postgres + schémas + Bento (curl démo, voir PROCESSORS.md)
+make demo-bento        # compose complet : postgres + schémas + Bento (curl démo, voir BENTO.md)
 make bento-lint        # lint de bento/config.yaml par le binaire Bento custom
 make build|vet|fmt
 ```
@@ -157,14 +157,7 @@ flowchart LR
     out --> pg[(PostgreSQL)]
 ```
 
-Les processeurs Bento (`pkg/processors`) sont décrits dans **[PROCESSORS.md](PROCESSORS.md)** avec leur propre schéma. La **distribution Bento** (`cmd/bento`, image Docker, config d'exemple et compose) y est documentée — démo :
-
-```sh
-make demo-bento
-curl -X POST http://localhost:4195/ingest -H "schema_url: http://schema-server:8080/schemas/employee/schema.json" \
-  -H "table_name: landing_employee" -H "source: curl-demo" \
-  -d '{"id":"7a0e8400-e29b-41d4-a716-446655440101","kind":"standard","name":"Claire Dubois","department":"Engineering","hourlyRate":42.5}'
-```
+Les processeurs Bento (`pkg/processors`) sont décrits dans **[PROCESSORS.md](PROCESSORS.md)** avec leur propre schéma. La **distribution Bento** (binaire `cmd/bento`, image Docker, config d'exemple, compose) est documentée dans **[BENTO.md](BENTO.md)** — quick start : `make demo-bento` puis le curl de démo.
 
 ```
 cmd/proto/main.go      CLI (flags uniquement, délègue tout à internal/cli)
