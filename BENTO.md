@@ -29,6 +29,89 @@ go build -o bento ./cmd/bento     # make bento (vers /tmp/s2t-bento)
 ./bento list processors | grep schema_to_table
 ```
 
+## Intégration dans votre propre code Go
+
+Deux degrés d'intégration : emballer le CLI complet, ou embarquer les processeurs dans votre propre application via le builder de flux.
+
+### Emballer le CLI Bento (ce que fait `cmd/bento`)
+
+```go
+package main
+
+import (
+	"context"
+
+	// composants Bento de base (http_server, drop, brokers…) et processeurs.
+	_ "github.com/warpstreamlabs/bento/v4/public/components/io"
+	_ "github.com/warpstreamlabs/bento/v4/public/components/pure"
+	_ "github.com/laurentpoirierfr/schema-to-table/pkg/processors"
+
+	"github.com/warpstreamlabs/bento/v4/public/service"
+)
+
+func main() {
+	service.RunCLI(context.Background())
+}
+```
+
+### Lancer un flux depuis votre application
+
+`service.NewEnvironment()` hérite des plugins enregistrés globalement : l'import du package `pkg/processors` suffit pour que `schema_to_table_insert` / `_upsert` soient disponibles dans le YAML posé sur le builder. La config se passe en constante — `dsn` peut rester interpolé depuis l'environnement (`${POSTGRES_DSN:...}`) :
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	_ "github.com/warpstreamlabs/bento/v4/public/components/io"
+	_ "github.com/warpstreamlabs/bento/v4/public/components/pure"
+	_ "github.com/laurentpoirierfr/schema-to-table/pkg/processors"
+
+	"github.com/warpstreamlabs/bento/v4/public/service"
+)
+
+const config = `
+input:
+  http_server:
+    address: 0.0.0.0:4195
+    path: /ingest
+    allowed_verbs: [POST]
+
+pipeline:
+  processors:
+    - schema_to_table_insert:
+        dsn: ${POSTGRES_DSN:postgres://s2t:s2t@localhost:5432/s2t?sslmode=disable}
+        schema_url_header: schema_url
+        table_name_header: table_name
+        pk: id
+        headers:
+          source: TEXT
+        on_error: per_message
+
+output:
+  drop: {}
+`
+
+func main() {
+	b := service.NewEnvironment().NewStreamBuilder()
+	if err := b.SetYAML(config); err != nil {
+		log.Fatal(err)
+	}
+
+	stream, err := b.Build()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := stream.Run(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+Rajoutez `_ "…/public/components/kafka"` et `_ "…/public/components/prometheus"` (exactement comme `cmd/bento`) dès qu'un input Kafka ou l'exposition `/metrics` sont nécessaires. Pour un flux piloté par vos coeurs Go plutôt que par une config YAML : `b.AddBatchProducerFunc` / `b.AddBatchConsumerFunc`.
+
 ## L'image Docker
 
 `Dockerfile` multi-étapes :
